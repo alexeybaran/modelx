@@ -256,7 +256,7 @@ def new_model(name=None):
     return _system.new_model(name).interface
 
 
-def new_space(name=None, bases=None, formula=None):
+def new_space(name=None, bases=None, formula=None, refs=None, *, collect_over=None, collect_outputs=None):
     """Create a new space in the current model.
 
     Creates a new :class:`~modelx.core.space.UserSpace` in the current model.
@@ -278,6 +278,12 @@ def new_space(name=None, bases=None, formula=None):
             
         formula (callable or str, optional): Parameter formula for creating
             dynamic space instances. If provided, the space becomes parameterized.
+        refs (dict, optional): References to define in the created space.
+        collect_over (mapping, optional): The one Space parameter and its
+            domain iterated by :meth:`Space.collect`. Other Space parameters remain
+            ordinary arguments to ``collect()``.
+        collect_outputs (callable or str, optional): Zero-argument per-ItemSpace
+            formula returning optional 'individual' and 'sum' output sections.
 
     Returns:
         :class:`~modelx.core.space.UserSpace`: The newly created space.
@@ -310,7 +316,9 @@ def new_space(name=None, bases=None, formula=None):
     """
     if cur_model() is None:
         new_model()
-    return cur_model().new_space(name, bases, formula)
+    return cur_model().new_space(
+        name, bases, formula, refs,
+        collect_over=collect_over, collect_outputs=collect_outputs)
 
 
 def defcells(space=None, name=None, is_cached=None, *funcs):
