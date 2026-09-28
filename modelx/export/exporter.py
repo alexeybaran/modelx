@@ -891,12 +891,24 @@ class SpaceTranslator(ParentTranslator):
                     raise ValueError(
                         "export collect domain must be a Cell or Reference "
                         "owned by the collection Space")
+                collect_params = [
+                    param for name, param in space.formula.signature.parameters.items()
+                    if name != loop_name]
+                collect_signature = str(inspect.Signature(collect_params))[1:-1]
+                collect_args = ', '.join(param.name for param in collect_params)
+                collect_names = ', '.join(repr(param.name) for param in collect_params)
+                if len(collect_params) == 1:
+                    collect_args += ','
+                    collect_names += ','
                 itemspace_methods += textwrap.dedent("""\
-                def collect(self, *args, **kwargs):
+                def collect(self{comma}{signature}):
                     return _mx_sys.collect_from_space(
-                        self, {domain}, {parameter!r}, args, kwargs)
+                        self, {domain}, {parameter!r}, ({names}), ({args}))
 
-                """).format(domain=domain_expr, parameter=loop_name)
+                """).format(domain=domain_expr, parameter=loop_name,
+                            comma=', ' if collect_signature else '',
+                            signature=collect_signature, args=collect_args,
+                            names=collect_names)
                 class_names.add('collect')
             delitem = self.delitem_asis
         else:

@@ -3,7 +3,6 @@ import collections
 import pickle
 from importlib import import_module
 import pathlib
-import inspect
 from copy import deepcopy
 from collections import OrderedDict
 from typing import Dict
@@ -133,6 +132,12 @@ class CollectResult:
         except KeyError as exc:
             raise AttributeError(name) from exc
 
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | set(self._fields))
+
+    def __repr__(self):
+        return 'CollectResult(%s)' % ', '.join(self._fields)
+
 
 def _mx_collect_detach(value):
     if isinstance(value, BaseSpace):
@@ -163,16 +168,28 @@ def _mx_collect_sum(old, new, path):
         raise TypeError('collect sum value cannot be added at ' + repr(path)) from exc
 
 
-def collect_from_space(base, domain, loop_name, args, kwargs):
+def _mx_collect_shape(value):
+    if type(value) is dict:
+        return {name: _mx_collect_shape(item) for name, item in value.items()}
+    return None
+
+
+def _mx_collect_check_shape(expected, value, path):
+    if expected is None:
+        if type(value) is dict:
+            raise ValueError('collect output structure changed at ' + repr(path))
+        return
+    if type(value) is not dict or tuple(value) != tuple(expected):
+        raise ValueError('collect output structure changed at ' + repr(path))
+    for name, item in value.items():
+        _mx_collect_check_shape(expected[name], item, path + (name,))
+
+
+def collect_from_space(base, domain, loop_name, names, args):
     """Evaluate an exported collection without retaining policy ItemSpaces."""
 
-    signature = inspect.signature(base.__call__)
-    if loop_name not in signature.parameters:
-        raise ValueError('collect parameter is not in Space signature')
-    call_signature = signature.replace(parameters=[
-        param for name, param in signature.parameters.items() if name != loop_name])
-    bound = call_signature.bind(*args, **kwargs)
-    bound.apply_defaults()
+    if len(names) != len(args) or loop_name in names:
+        raise ValueError('invalid collect arguments')
     if isinstance(domain, (str, bytes, set, frozenset)) or iter(domain) is domain:
         raise TypeError('collect domain must be finite, ordered and re-iterable')
     coords = tuple(domain)
@@ -184,8 +201,9 @@ def collect_from_space(base, domain, loop_name, args, kwargs):
     result = None
     modes = None
     individual_shape = None
+    scratch = {}
     for coordinate in coords:
-        values = dict(bound.arguments)
+        values = dict(zip(names, args))
         values[loop_name] = coordinate
         root = base.__class__(base)
         for space, template in zip(root._mx_walk(), base._mx_walk()):
@@ -195,6 +213,9 @@ def collect_from_space(base, domain, loop_name, args, kwargs):
             base._mx_assign_params(space, **values)
             space._mx_roots.extend(base._mx_roots)
             space._mx_roots.append(root)
+            attach = getattr(space, '_mx_collect_attach', None)
+            if attach is not None:
+                attach(scratch, template)
         outputs = root.collect_outputs()
         if type(outputs) is not dict or not outputs or set(outputs) - {'individual', 'sum'}:
             raise ValueError('collect_outputs must declare individual and/or sum')
@@ -208,15 +229,20 @@ def collect_from_space(base, domain, loop_name, args, kwargs):
                 raise TypeError('collect_outputs sections need named values')
             items = _mx_collect_detach(items)
             if mode == 'individual':
-                shape = tuple(items)
+                shape = {name: _mx_collect_shape(item)
+                         for name, item in items.items()}
                 if individual_shape is None:
                     individual_shape = shape
                     result[mode] = OrderedDict()
-                elif shape != individual_shape:
-                    raise ValueError('individual output names changed between policies')
+                else:
+                    _mx_collect_check_shape(individual_shape, items, (mode,))
                 result[mode][coordinate] = CollectResult(items)
             else:
                 result[mode] = _mx_collect_sum(result[mode], items, (mode,))
+        for space, template in zip(root._mx_walk(), base._mx_walk()):
+            release = getattr(space, '_mx_collect_release', None)
+            if release is not None:
+                release(scratch, template)
         del root
 
     return CollectResult({
