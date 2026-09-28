@@ -1,4 +1,6 @@
 import pytest
+import sys
+from importlib import import_module
 from modelx.core.errors import FormulaError
 import modelx as mx
 
@@ -25,6 +27,78 @@ def _make_space(model):
     space.new_cells("cf", "lambda t: factor * policy_id + scenario + t")
     space.new_cells("pv", "lambda: factor * policy_id - scenario")
     return space
+
+
+def test_collect_declaration_roundtrips_in_model_serialization(tmp_path):
+    model = mx.new_model("CollectRoundtrip")
+    try:
+        _make_space(model)
+        mx.write_model(model, tmp_path / "saved")
+    finally:
+        model.close()
+
+    restored = mx.read_model(tmp_path / "saved")
+    try:
+        result = restored.Projection.collect(5)
+        assert result.sum.pv == 45
+        assert result.individual[2].net_cf == {0: 25, 1: 26, 2: 27}
+    finally:
+        restored.close()
+
+
+def test_collect_exports_transient_policy_execution(tmp_path):
+    model = mx.new_model("CollectExport")
+    try:
+        projection = _make_space(model)
+        expected = projection.collect(5)
+        model.export(tmp_path / "collect_export")
+    finally:
+        model.close()
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        exported = import_module("collect_export").mx_model
+        result = exported.Projection.collect(5)
+        assert result.sum.pv == expected.sum.pv
+        assert result.sum.net_cf == expected.sum.net_cf
+        assert result.individual[2].net_cf == expected.individual[2].net_cf
+        assert exported.Projection._mx_itemspaces == {}
+        assert exported.Projection(5, 2).pv() == 15
+    finally:
+        sys.path.pop(0)
+        for name in list(sys.modules):
+            if name == "collect_export" or name.startswith("collect_export."):
+                del sys.modules[name]
+
+
+def test_collect_cell_domain_roundtrips_and_exports(tmp_path):
+    model = mx.new_model("CollectCellDomain")
+    try:
+        projection = model.new_space("Projection", formula="lambda policy_id: None")
+        ids = projection.new_cells("ids", "lambda: (1, 2, 3)")
+        projection.new_cells("collect_outputs", 'lambda: {"sum": {"value": value()}}')
+        projection._impl.set_collect_spec({"policy_id": ids})
+        projection.new_cells("value", "lambda: policy_id * 2")
+        assert projection.collect().sum.value == 12
+        mx.write_model(model, tmp_path / "saved_cell")
+        model.export(tmp_path / "cell_export")
+    finally:
+        model.close()
+
+    restored = mx.read_model(tmp_path / "saved_cell")
+    try:
+        assert restored.Projection.collect().sum.value == 12
+    finally:
+        restored.close()
+    sys.path.insert(0, str(tmp_path))
+    try:
+        exported = import_module("cell_export").mx_model
+        assert exported.Projection.collect().sum.value == 12
+    finally:
+        sys.path.pop(0)
+        for name in list(sys.modules):
+            if name == "cell_export" or name.startswith("cell_export."):
+                del sys.modules[name]
 
 
 def test_collect_supports_individual_and_sum_modes():

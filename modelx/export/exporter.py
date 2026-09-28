@@ -875,6 +875,29 @@ class SpaceTranslator(ParentTranslator):
                 param_assigns=textwrap.indent(
                     self.param_assigns(attrs.params), ' ' * 4)
             )
+            if space._impl.collect_over_spec is not None:
+                if len(space._impl.collect_over_spec) != 1:
+                    raise ValueError("export supports one collect parameter")
+                loop_name, domain = next(iter(space._impl.collect_over_spec.items()))
+                if loop_name not in attrs.params:
+                    raise ValueError("collect parameter is not a Space parameter")
+                if (domain.source is not None
+                        and getattr(domain.source, 'parent', None) is space._impl
+                        and domain.source.name in space._impl.cells):
+                    domain_expr = "self.%s()" % domain.source.name
+                elif domain.ref_parent is space._impl:
+                    domain_expr = "self.%s" % domain.ref_name
+                else:
+                    raise ValueError(
+                        "export collect domain must be a Cell or Reference "
+                        "owned by the collection Space")
+                itemspace_methods += textwrap.dedent("""\
+                def collect(self, *args, **kwargs):
+                    return _mx_sys.collect_from_space(
+                        self, {domain}, {parameter!r}, args, kwargs)
+
+                """).format(domain=domain_expr, parameter=loop_name)
+                class_names.add('collect')
             delitem = self.delitem_asis
         else:
             itemspace_dict = ''

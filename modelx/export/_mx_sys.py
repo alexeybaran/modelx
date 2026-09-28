@@ -3,6 +3,9 @@ import collections
 import pickle
 from importlib import import_module
 import pathlib
+import inspect
+from copy import deepcopy
+from collections import OrderedDict
 from typing import Dict
 try:
     has_io = True
@@ -114,6 +117,111 @@ class BaseSpace(BaseParent):
                 obj = getattr(obj, name)
 
         return obj
+
+
+class CollectResult:
+    """Detached values returned by an exported collect-enabled Space."""
+
+    __slots__ = ('_fields',)
+
+    def __init__(self, fields):
+        self._fields = fields
+
+    def __getattr__(self, name):
+        try:
+            return self._fields[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+def _mx_collect_detach(value):
+    if isinstance(value, BaseSpace):
+        raise TypeError('collect output cannot retain a live Space')
+    if type(value) is dict:
+        return {k: _mx_collect_detach(v) for k, v in value.items()}
+    if type(value) in (list, tuple):
+        return type(value)(_mx_collect_detach(v) for v in value)
+    return deepcopy(value)
+
+
+def _mx_collect_sum(old, new, path):
+    if type(new) is dict:
+        if old is None:
+            old = {name: None for name in new}
+        elif type(old) is not dict or tuple(old) != tuple(new):
+            raise ValueError('collect output structure changed at ' + repr(path))
+        for name, value in new.items():
+            old[name] = _mx_collect_sum(old[name], value, path + (name,))
+        return old
+    if type(old) is dict:
+        raise ValueError('collect output structure changed at ' + repr(path))
+    if old is None:
+        return new
+    try:
+        return old + new
+    except Exception as exc:
+        raise TypeError('collect sum value cannot be added at ' + repr(path)) from exc
+
+
+def collect_from_space(base, domain, loop_name, args, kwargs):
+    """Evaluate an exported collection without retaining policy ItemSpaces."""
+
+    signature = inspect.signature(base.__call__)
+    if loop_name not in signature.parameters:
+        raise ValueError('collect parameter is not in Space signature')
+    call_signature = signature.replace(parameters=[
+        param for name, param in signature.parameters.items() if name != loop_name])
+    bound = call_signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    if isinstance(domain, (str, bytes, set, frozenset)) or iter(domain) is domain:
+        raise TypeError('collect domain must be finite, ordered and re-iterable')
+    coords = tuple(domain)
+    if not coords:
+        raise ValueError('collect domain must not be empty')
+    if len(set(coords)) != len(coords):
+        raise ValueError('collect domain contains duplicate coordinates')
+
+    result = None
+    modes = None
+    individual_shape = None
+    for coordinate in coords:
+        values = dict(bound.arguments)
+        values[loop_name] = coordinate
+        root = base.__class__(base)
+        for space, template in zip(root._mx_walk(), base._mx_walk()):
+            space._mx_copy_refs(template, base)
+            for previous_root in base._mx_roots:
+                previous_root._mx_copy_params(space)
+            base._mx_assign_params(space, **values)
+            space._mx_roots.extend(base._mx_roots)
+            space._mx_roots.append(root)
+        outputs = root.collect_outputs()
+        if type(outputs) is not dict or not outputs or set(outputs) - {'individual', 'sum'}:
+            raise ValueError('collect_outputs must declare individual and/or sum')
+        if modes is None:
+            modes = tuple(outputs)
+            result = {mode: None for mode in modes}
+        elif tuple(outputs) != modes:
+            raise ValueError('collect_outputs modes changed between policies')
+        for mode, items in outputs.items():
+            if type(items) is not dict or not items or any(type(name) is not str for name in items):
+                raise TypeError('collect_outputs sections need named values')
+            items = _mx_collect_detach(items)
+            if mode == 'individual':
+                shape = tuple(items)
+                if individual_shape is None:
+                    individual_shape = shape
+                    result[mode] = OrderedDict()
+                elif shape != individual_shape:
+                    raise ValueError('individual output names changed between policies')
+                result[mode][coordinate] = CollectResult(items)
+            else:
+                result[mode] = _mx_collect_sum(result[mode], items, (mode,))
+        del root
+
+    return CollectResult({
+        mode: value if mode == 'individual' else CollectResult(value)
+        for mode, value in result.items()})
 
 
 class MiniBaseSharedIO:
