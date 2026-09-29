@@ -87,7 +87,7 @@ def test_export_preserves_author_formula_sources_for_native_compilers(tmp_path):
 
     manifest = json.loads((export_path / "_mx_formula_sources.json").read_text(
         encoding="utf-8"))
-    assert manifest["schema"] == "modelx.formula_sources.v1"
+    assert manifest["schema"] == "modelx.formula_sources.v2"
     assert manifest["model"] == "CollectSources"
     space = manifest["spaces"]["CollectSources.Projection"]
     assert space["formula"] == space_formula
@@ -100,6 +100,8 @@ def test_export_preserves_author_formula_sources_for_native_compilers(tmp_path):
         assert space["cells"][name]["source"] == source
         assert space["cells"][name]["sha256"] == hashlib.sha256(
             source.encode("utf-8")).hexdigest()
+        assert space["cells"][name]["cached"] is True
+        assert space["cells"][name]["allow_none"] is False
 
 
 def test_collect_cell_domain_roundtrips_and_exports(tmp_path):

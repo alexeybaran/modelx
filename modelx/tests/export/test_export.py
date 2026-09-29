@@ -18,7 +18,8 @@ def test_check_contents(tmp_path):
     m = mx.read_model(sample_dir / 'Options')
     mx.export_model(m, nomx_path / 'Options')
     assert set(os.listdir(nomx_path / 'Options')) == {
-        '__init__.py', '_mx_sys.py', '_mx_classes.py', '_mx_model.py'}
+        '__init__.py', '_mx_sys.py', '_mx_classes.py', '_mx_model.py',
+        '_mx_formula_sources.json'}
     m.close()
 
 

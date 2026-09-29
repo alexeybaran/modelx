@@ -211,6 +211,14 @@ class Exporter:
         The exported model continues to use its generated ``_mx_classes``.
         """
         spaces = {}
+        def allows_none(obj):
+            while obj is not None:
+                value = getattr(obj, 'allow_none', None)
+                if value is not None:
+                    return bool(value)
+                obj = getattr(obj, 'parent', None)
+            return False
+
         for parent in self.gen_parents():
             if not isinstance(parent, BaseSpace):
                 continue
@@ -221,6 +229,7 @@ class Exporter:
                     'source': source,
                     'sha256': hashlib.sha256(source.encode('utf-8')).hexdigest(),
                     'cached': bool(value.is_cached),
+                    'allow_none': allows_none(value),
                 }
             space_source = parent.formula.source if parent.formula else None
             info = {
@@ -244,7 +253,7 @@ class Exporter:
                     raise ValueError('export collect domain must belong to the collection Space')
                 info['collect'] = {'over': parameter, 'domain': origin}
             spaces[parent.fullname] = info
-        return {'schema': 'modelx.formula_sources.v1',
+        return {'schema': 'modelx.formula_sources.v2',
                 'model': self.model.name, 'spaces': spaces}
 
     def export(self):
