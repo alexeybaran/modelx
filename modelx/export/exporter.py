@@ -13,6 +13,8 @@
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
 import collections
+import hashlib
+import json
 import pathlib
 import sys
 import textwrap
@@ -49,6 +51,7 @@ DATA_MODULE = '_mx_io'  # _mx_io is hard-coded in _mx_sys
 MACRO_MODULE = '_mx_macros'
 SPACE_PKG_PREFIX = '_m_'
 SPACE_CLS_PREFIX = '_c_'
+SOURCE_MANIFEST = '_mx_formula_sources.json'
 
 # The attribute of the generated Model class and of every locked Space class
 # that holds the threading.RLock shared by the locked Spaces of a model. Its
@@ -201,6 +204,49 @@ class Exporter:
             for child in parent.spaces.values():
                 que.append(child)
 
+    def source_manifest(self):
+        """Preserve author formulas before export rewrites their Python methods.
+
+        This is source metadata for downstream compilers, not executable state.
+        The exported model continues to use its generated ``_mx_classes``.
+        """
+        spaces = {}
+        for parent in self.gen_parents():
+            if not isinstance(parent, BaseSpace):
+                continue
+            cells = {}
+            for name, value in parent.cells.items():
+                source = value.formula.source
+                cells[name] = {
+                    'source': source,
+                    'sha256': hashlib.sha256(source.encode('utf-8')).hexdigest(),
+                    'cached': bool(value.is_cached),
+                }
+            space_source = parent.formula.source if parent.formula else None
+            info = {
+                'formula': space_source,
+                'parameters': list(parent.parameters or ()),
+                'references': [name for name in parent.refs if not name.startswith('_')],
+                'cells': cells,
+            }
+            collect = parent._impl.collect_over_spec
+            if collect is not None:
+                if len(collect) != 1:
+                    raise ValueError('export supports one collect parameter')
+                parameter, domain = next(iter(collect.items()))
+                if (domain.source is not None
+                        and getattr(domain.source, 'parent', None) is parent._impl
+                        and domain.source.name in parent._impl.cells):
+                    origin = {'kind': 'cell', 'name': domain.source.name}
+                elif domain.ref_parent is parent._impl:
+                    origin = {'kind': 'reference', 'name': domain.ref_name}
+                else:
+                    raise ValueError('export collect domain must belong to the collection Space')
+                info['collect'] = {'over': parameter, 'domain': origin}
+            spaces[parent.fullname] = info
+        return {'schema': 'modelx.formula_sources.v1',
+                'model': self.model.name, 'spaces': spaces}
+
     def export(self):
         io_manager = DataManager(self.model)
 
@@ -261,6 +307,12 @@ class Exporter:
 
         # Write pickle data
         io_manager.pickle(self.path / '_mx_pickled')
+
+        # Preserve the exact author formulas for compilers that generate native
+        # execution. The Python export above remains the runtime authority.
+        write_str_utf8(json.dumps(self.source_manifest(), ensure_ascii=False,
+                                  sort_keys=True, indent=2) + '\n',
+                       self.path / SOURCE_MANIFEST)
 
 
 class DataManager:

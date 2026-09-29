@@ -1,4 +1,6 @@
 import pytest
+import hashlib
+import json
 import sys
 from importlib import import_module
 from modelx.core.errors import FormulaError
@@ -69,6 +71,35 @@ def test_collect_exports_transient_policy_execution(tmp_path):
         for name in list(sys.modules):
             if name == "collect_export" or name.startswith("collect_export."):
                 del sys.modules[name]
+
+
+def test_export_preserves_author_formula_sources_for_native_compilers(tmp_path):
+    model = mx.new_model("CollectSources")
+    try:
+        projection = _make_space(model)
+        expected = {name: cell.formula.source
+                    for name, cell in projection.cells.items()}
+        space_formula = projection.formula.source
+        export_path = tmp_path / "sources_export"
+        model.export(export_path)
+    finally:
+        model.close()
+
+    manifest = json.loads((export_path / "_mx_formula_sources.json").read_text(
+        encoding="utf-8"))
+    assert manifest["schema"] == "modelx.formula_sources.v1"
+    assert manifest["model"] == "CollectSources"
+    space = manifest["spaces"]["CollectSources.Projection"]
+    assert space["formula"] == space_formula
+    assert space["parameters"] == ["scenario", "policy_id"]
+    assert space["collect"] == {"over": "policy_id", "domain": {
+        "kind": "reference", "name": "policy_ids"}}
+    assert {"policy_ids", "factor"} <= set(space["references"])
+    assert set(space["cells"]) == set(expected)
+    for name, source in expected.items():
+        assert space["cells"][name]["source"] == source
+        assert space["cells"][name]["sha256"] == hashlib.sha256(
+            source.encode("utf-8")).hexdigest()
 
 
 def test_collect_cell_domain_roundtrips_and_exports(tmp_path):
