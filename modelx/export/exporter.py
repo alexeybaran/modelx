@@ -13,6 +13,7 @@
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
 import collections
+import ast
 import hashlib
 import json
 import pathlib
@@ -184,6 +185,28 @@ def get_space_formula_attrs(space: BaseSpace):
     if is_lambda_expr(src):
         src = lambda_to_func(src, '_formula')
     return get_func_attrs(src)
+
+
+def space_formula_with_refs(space: BaseSpace):
+    """Return a Space formula that declares dynamic refs, if present.
+
+    Export has historically emitted only the parameter assignment from a
+    Space formula. A literal ``{'refs': ...}`` result needs to be evaluated
+    for each ItemSpace, including temporary collection ItemSpaces.
+    """
+    if space.formula is None:
+        return None
+    source = space.formula.source
+    tree = ast.parse(source)
+    if not any(isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+               and any(isinstance(key, ast.Constant) and key.value == 'refs'
+                       for key in node.value.keys if key is not None)
+               for node in ast.walk(tree)):
+        return None
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
+        raise ValueError('Dynamic-reference Space formula must be a function')
+    tree.body[0].name = '_mx_space_formula'
+    return ast.unparse(tree)
 
 
 class Exporter:
@@ -723,7 +746,7 @@ class SpaceTranslator(ParentTranslator):
 
                 self._mx_assign_params(_mx_s, {args})
                 _mx_s._mx_roots.extend(self._mx_roots)
-                _mx_s._mx_roots.append(_mx_root)
+                _mx_s._mx_roots.append(_mx_root){dynamic_formula}
 
             self._mx_itemspaces[_mx_key] = _mx_root
             return _mx_root
@@ -760,7 +783,7 @@ class SpaceTranslator(ParentTranslator):
 
                 self._mx_assign_params(_mx_s, {args})
                 _mx_s._mx_roots.extend(self._mx_roots)
-                _mx_s._mx_roots.append(_mx_root)
+                _mx_s._mx_roots.append(_mx_root){dynamic_formula}
 
             self._mx_itemspaces[_mx_key] = _mx_root
             return _mx_root
@@ -824,6 +847,10 @@ class SpaceTranslator(ParentTranslator):
                 src = lambda_to_func(src, k)
             lines.append(src)
 
+        dynamic_formula_source = space_formula_with_refs(space)
+        if dynamic_formula_source is not None:
+            lines.append(dynamic_formula_source)
+
         source = '\n'.join(lines)
 
         cells = set()   # Pass cells names for replacing subscription
@@ -833,6 +860,8 @@ class SpaceTranslator(ParentTranslator):
                     cells.add(k)
 
         cacheless = set(k for k, v in space.cells.items() if v.is_cached == False)
+        if dynamic_formula_source is not None:
+            cacheless.add('_mx_space_formula')
 
         trans = FormulaTransformer(source, cells, cacheless)
 
@@ -911,6 +940,8 @@ class SpaceTranslator(ParentTranslator):
         if space.formula:
             itemspace_dict = "self._mx_itemspaces = {}"
             slot_names.append('_mx_itemspaces')
+            if dynamic_formula_source is not None:
+                slot_names.append('__dict__')
             attrs = get_space_formula_attrs(space)
             slot_names.extend(attrs.params)         # _mx_assign_params
             class_names.update([
@@ -934,11 +965,28 @@ class SpaceTranslator(ParentTranslator):
                 param_copies=textwrap.indent(
                     self.param_assigns(attrs.params, copy=True), ' ' * 4),
                 param_assigns=textwrap.indent(
-                    self.param_assigns(attrs.params), ' ' * 4)
+                    self.param_assigns(attrs.params), ' ' * 4),
+                dynamic_formula=('\n\n            _mx_root._mx_apply_formula(' + attrs.arg_str + ')'
+                                 if dynamic_formula_source is not None else '')
             )
+            if dynamic_formula_source is not None:
+                itemspace_methods += textwrap.dedent("""\
+                def _mx_apply_formula(self, *args, **arguments):
+                    result = self._mx_space_formula(*args, **arguments)
+                    if (type(result) is not dict or set(result) != {'refs'}
+                            or type(result['refs']) is not dict):
+                        raise ValueError('Exported Space formula must return a refs dictionary')
+                    for name, value in result['refs'].items():
+                        if type(name) is not str or name.startswith('_'):
+                            raise ValueError('Invalid dynamic Reference name')
+                        setattr(self, name, value)
+
+                """)
             if space._impl.collect_over_spec is not None:
                 if len(space._impl.collect_over_spec) != 1:
                     raise ValueError("export supports one collect parameter")
+                itemspace_dict += "\nself._mx_collect_cache = {}"
+                slot_names.append('_mx_collect_cache')
                 loop_name, domain = next(iter(space._impl.collect_over_spec.items()))
                 if loop_name not in attrs.params:
                     raise ValueError("collect parameter is not a Space parameter")
@@ -963,8 +1011,20 @@ class SpaceTranslator(ParentTranslator):
                     collect_names += ','
                 itemspace_methods += textwrap.dedent("""\
                 def collect(self{comma}{signature}):
-                    return _mx_sys.collect_from_space(
-                        self, {domain}, {parameter!r}, ({names}), ({args}))
+                    _mx_domain = tuple({domain})
+                    _mx_key = (_mx_domain, ({args}))
+                    try:
+                        return self._mx_collect_cache[_mx_key]
+                    except KeyError:
+                        pass
+                    except TypeError:
+                        # Unhashable arguments retain the uncached route.
+                        _mx_key = None
+                    _mx_result = _mx_sys.collect_from_space(
+                        self, _mx_domain, {parameter!r}, ({names}), ({args}))
+                    if _mx_key is not None:
+                        self._mx_collect_cache[_mx_key] = _mx_result
+                    return _mx_result
 
                 """).format(domain=domain_expr, parameter=loop_name,
                             comma=', ' if collect_signature else '',

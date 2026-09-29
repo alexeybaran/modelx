@@ -216,6 +216,9 @@ def collect_from_space(base, domain, loop_name, names, args):
             attach = getattr(space, '_mx_collect_attach', None)
             if attach is not None:
                 attach(scratch, template)
+        apply_formula = getattr(root, '_mx_apply_formula', None)
+        if apply_formula is not None:
+            apply_formula(**values)
         outputs = root.collect_outputs()
         if type(outputs) is not dict or not outputs or set(outputs) - {'individual', 'sum'}:
             raise ValueError('collect_outputs must declare individual and/or sum')

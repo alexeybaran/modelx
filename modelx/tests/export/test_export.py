@@ -23,6 +23,68 @@ def test_check_contents(tmp_path):
     m.close()
 
 
+def test_collected_dynamic_space_refs_survive_export(tmp_path):
+    """A Space formula must populate each temporary collection policy."""
+    m = mx.new_model('DynamicRefsExport')
+    domain = (1, 2)
+    space = m.new_space(
+        'Policies',
+        formula='def Policies(idx):\n    return {"refs": {"factor": factors[idx]}}\n',
+        refs={'factors': {1: 2.0, 2: 3.0}, 'policy_ids': domain},
+        collect_over={'idx': domain},
+        collect_outputs=lambda: {'sum': {'value': value()}},
+    )
+    space.new_cells('value', 'def value():\n    return factor * idx\n')
+    try:
+        assert m.Policies.collect().sum.value == 8.0
+        m.export(tmp_path / 'DynamicRefsExport')
+        sys.path.insert(0, str(tmp_path))
+        try:
+            from DynamicRefsExport import mx_model as exported
+            first = exported.Policies.collect()
+            assert first.sum.value == 8.0
+            assert exported.Policies.collect() is first
+            assert exported.Policies[1].value() == 2.0
+            assert exported.Policies[2].value() == 6.0
+            assert exported.Policies[1].factor == 2.0
+            exported.Policies.policy_ids = (1,)
+            assert exported.Policies.collect().sum.value == 2.0
+        finally:
+            sys.path.pop(0)
+            for name in tuple(sys.modules):
+                if name == 'DynamicRefsExport' or name.startswith('DynamicRefsExport.'):
+                    del sys.modules[name]
+    finally:
+        m.close()
+
+
+def test_exported_collect_retries_after_failure(tmp_path):
+    m = mx.new_model('CollectRetryExport')
+    space = m.new_space(
+        'Policies', formula='def Policies(idx):\n    return {"refs": {"factor": factors[idx]}}\n',
+        refs={'factors': {1: 2.0, 2: 0.0}, 'policy_ids': (1, 2)},
+        collect_over={'idx': (1, 2)},
+        collect_outputs=lambda: {'sum': {'value': value()}},
+    )
+    space.new_cells('value', 'def value():\n    return idx / factor\n')
+    try:
+        m.export(tmp_path / 'CollectRetryExport')
+        sys.path.insert(0, str(tmp_path))
+        try:
+            from CollectRetryExport import mx_model as exported
+            with pytest.raises(ZeroDivisionError):
+                exported.Policies.collect()
+            exported.Policies.factors[2] = 4.0
+            assert exported.Policies.collect().sum.value == 1.0
+        finally:
+            sys.path.pop(0)
+            for name in tuple(sys.modules):
+                if name == 'CollectRetryExport' or name.startswith('CollectRetryExport.'):
+                    del sys.modules[name]
+    finally:
+        m.close()
+
+
 @pytest.fixture(scope='module')
 def empty_model():
     m = mx.read_model(sample_dir / 'EmptyModel')
