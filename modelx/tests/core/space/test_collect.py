@@ -104,6 +104,23 @@ def test_export_preserves_author_formula_sources_for_native_compilers(tmp_path):
         assert space["cells"][name]["allow_none"] is False
 
 
+def test_export_records_space_reference_targets_even_when_aliased(tmp_path):
+    model = mx.new_model("ReferenceTargets")
+    try:
+        source = model.new_space("Source")
+        consumer = model.new_space("Consumer")
+        consumer.Alias = source
+        consumer.new_cells("value", "lambda: Alias.value()")
+        source.new_cells("value", "lambda: 2")
+        model.export(tmp_path / "aliased")
+    finally:
+        model.close()
+    manifest = json.loads((tmp_path / "aliased" / "_mx_formula_sources.json")
+                          .read_text(encoding="utf-8"))
+    assert manifest["spaces"]["ReferenceTargets.Consumer"]["reference_targets"] == {
+        "Alias": "ReferenceTargets.Source"}
+
+
 def test_collect_cell_domain_roundtrips_and_exports(tmp_path):
     model = mx.new_model("CollectCellDomain")
     try:

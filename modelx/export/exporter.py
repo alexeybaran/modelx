@@ -259,6 +259,13 @@ class Exporter:
                 'formula': space_source,
                 'parameters': list(parent.parameters or ()),
                 'references': [name for name in parent.refs if not name.startswith('_')],
+                # A reference name need not match its target Space name. Keep
+                # the exported identity so connected compilers can wire aliases
+                # and nested Spaces without guessing from lexical names.
+                'reference_targets': {
+                    name: value.fullname for name, value in parent.refs.items()
+                    if not name.startswith('_') and isinstance(value, BaseSpace)
+                },
                 'cells': cells,
             }
             collect = parent._impl.collect_over_spec
