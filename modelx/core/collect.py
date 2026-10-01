@@ -64,8 +64,12 @@ class CollectResult:
         self._fields = fields
 
     def __getattr__(self, name):
+        # pickle/deepcopy probe special methods before restoring slot state.
+        # Reading self._fields here would recursively enter __getattr__ while
+        # that slot is unset on the newly allocated object.
+        fields = object.__getattribute__(self, '_fields')
         try:
-            return self._fields[name]
+            return fields[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
 

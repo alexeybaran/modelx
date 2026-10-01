@@ -127,8 +127,10 @@ class CollectResult:
         self._fields = fields
 
     def __getattr__(self, name):
+        # Slot state may not exist yet while pickle/deepcopy probes this object.
+        fields = object.__getattribute__(self, '_fields')
         try:
-            return self._fields[name]
+            return fields[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
 
