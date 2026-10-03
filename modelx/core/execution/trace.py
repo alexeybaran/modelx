@@ -205,6 +205,10 @@ class TraceManager:
     def clear_with_descs(self, node):
         """Clear values and nodes calculated from `source`."""
         for n in list(nx.dfs_postorder_nodes(self.tracegraph, node)):
+            # Clearing a dynamic Space can recursively clear its Cells. Those
+            # nodes may already be removed from this precomputed traversal.
+            if not self.tracegraph.has_node(n):
+                continue
             self.tracegraph.remove_node(n)
             self.refgraph.remove_with_referred(n)
             n[OBJ].on_clear_trace(n[KEY])
