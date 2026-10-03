@@ -142,6 +142,10 @@ class CollectResult:
 
 
 def _mx_collect_detach(value):
+    # Exact immutable builtins already satisfy deepcopy's isolation contract.
+    # Subclasses keep their custom copying behavior on the ordinary path.
+    if type(value) in (float, int, bool, str, bytes, complex, type(None)):
+        return value
     if isinstance(value, BaseSpace):
         raise TypeError('collect output cannot retain a live Space')
     if type(value) is dict:
