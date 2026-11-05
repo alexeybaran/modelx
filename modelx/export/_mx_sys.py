@@ -140,6 +140,8 @@ class CollectResult:
 
 
 def _mx_collect_detach(value):
+    if type(value) in (float, int, bool, str, bytes, complex, type(None)):
+        return value
     if isinstance(value, BaseSpace):
         raise TypeError('collect output cannot retain a live Space')
     if type(value) is dict:
@@ -185,7 +187,7 @@ def _mx_collect_check_shape(expected, value, path):
         _mx_collect_check_shape(expected[name], item, path + (name,))
 
 
-def collect_from_space(base, domain, loop_name, names, args):
+def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None):
     """Evaluate an exported collection without retaining policy ItemSpaces."""
 
     if len(names) != len(args) or loop_name in names:
@@ -198,6 +200,25 @@ def collect_from_space(base, domain, loop_name, names, args):
     if len(set(coords)) != len(coords):
         raise ValueError('collect domain contains duplicate coordinates')
 
+    key = (coords, args)
+    if cache is not None:
+        try:
+            hash(key)
+        except TypeError:
+            cache = None
+        else:
+            found = cache.get(key)
+            if found is not None:
+                return found
+
+    if evaluate is None:
+        result = _mx_collect_evaluate(base, coords, loop_name, names, args)
+    else:
+        result = evaluate()
+    return result if cache is None else cache.setdefault(key, result)
+
+
+def _mx_collect_evaluate(base, coords, loop_name, names, args):
     result = None
     modes = None
     individual_shape = None
@@ -209,13 +230,18 @@ def collect_from_space(base, domain, loop_name, names, args):
         releases = []
         complete = False
         try:
-            for space, template in zip(root._mx_walk(), base._mx_walk()):
+            spaces = list(zip(root._mx_walk(), base._mx_walk()))
+            for space, template in spaces:
                 space._mx_copy_refs(template, base)
                 for previous_root in base._mx_roots:
                     previous_root._mx_copy_params(space)
                 base._mx_assign_params(space, **values)
                 space._mx_roots.extend(base._mx_roots)
                 space._mx_roots.append(root)
+            apply_formula = getattr(root, '_mx_apply_formula', None)
+            if apply_formula is not None:
+                apply_formula(**values)
+            for space, template in spaces:
                 release = getattr(space, '_mx_collect_release', None)
                 if release is not None:
                     releases.append((release, template))

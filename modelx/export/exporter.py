@@ -12,6 +12,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+import ast
 import collections
 import pathlib
 import sys
@@ -181,6 +182,37 @@ def get_space_formula_attrs(space: BaseSpace):
     if is_lambda_expr(src):
         src = lambda_to_func(src, '_formula')
     return get_func_attrs(src)
+
+
+def dynamic_ref_formula(space, cells, ref_names):
+    """Render Space formulas that declare named per-ItemSpace References."""
+    source = space.formula.source
+    if is_lambda_expr(source):
+        source = lambda_to_func(source, '_formula')
+    name = get_func_attrs(source).name
+    keys = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
+            continue
+        for key, value in zip(node.value.keys, node.value.values):
+            if not isinstance(key, ast.Constant) or key.value != 'refs':
+                continue
+            if not isinstance(value, ast.Dict) or any(
+                not isinstance(k, ast.Constant) or type(k.value) is not str
+                or not k.value.isidentifier() or k.value.startswith('_')
+                for k in value.keys
+            ):
+                raise ValueError('Exported Space formula must name its dynamic References')
+            keys.update(k.value for k in value.keys)
+    if not keys:
+        return '', ()
+    if keys & (set(space.parameters) | set(space.cells) | set(space.spaces)):
+        raise ValueError('Dynamic References cannot shadow Space parameters, Cells or child Spaces')
+    source = '\n'.join([*(key + ' = None' for key in ref_names), source])
+    trans = FormulaTransformer(source, cells, {name})
+    method, = trans.transformed.body
+    method = method.with_changes(name=method.name.with_changes(value='_mx_space_formula'))
+    return trans.transformed.code_for_node(method), sorted(keys)
 
 
 class Exporter:
@@ -662,7 +694,7 @@ class SpaceTranslator(ParentTranslator):
 
                 self._mx_assign_params(_mx_s, {args})
                 _mx_s._mx_roots.extend(self._mx_roots)
-                _mx_s._mx_roots.append(_mx_root)
+                _mx_s._mx_roots.append(_mx_root){dynamic_refs}
 
             self._mx_itemspaces[_mx_key] = _mx_root
             return _mx_root
@@ -699,7 +731,7 @@ class SpaceTranslator(ParentTranslator):
 
                 self._mx_assign_params(_mx_s, {args})
                 _mx_s._mx_roots.extend(self._mx_roots)
-                _mx_s._mx_roots.append(_mx_root)
+                _mx_s._mx_roots.append(_mx_root){dynamic_refs}
 
             self._mx_itemspaces[_mx_key] = _mx_root
             return _mx_root
@@ -770,6 +802,12 @@ class SpaceTranslator(ParentTranslator):
             for k, v in d.items():
                 if isinstance(v, Cells):
                     cells.add(k)
+
+        space_formula, dynamic_refs = ('', ())
+        if space.formula:
+            space_formula, dynamic_refs = dynamic_ref_formula(space, cells, self.ref_names(space))
+            lines[:0] = [key + ' = None' for key in dynamic_refs if key not in space.refs]
+            source = '\n'.join(lines)
 
         cacheless = set(k for k, v in space.cells.items() if v.is_cached == False)
 
@@ -845,6 +883,7 @@ class SpaceTranslator(ParentTranslator):
             slot_names.append(LOCK_ATTR)
 
         slot_names.extend(self.ref_names(space))    # ref_assigns / ref_copies
+        slot_names.extend(dynamic_refs)
 
         # ItemSpace
         if space.formula:
@@ -870,11 +909,29 @@ class SpaceTranslator(ParentTranslator):
                 args=attrs.arg_str,
                 params=attrs.param_str,
                 idx_args=attrs.key_str,
+                dynamic_refs=('\n\n        _mx_root._mx_apply_formula(' + attrs.arg_str + ')'
+                              if space_formula else ''),
                 param_copies=textwrap.indent(
                     self.param_assigns(attrs.params, copy=True), ' ' * 4),
                 param_assigns=textwrap.indent(
                     self.param_assigns(attrs.params), ' ' * 4)
             )
+            if space_formula:
+                class_names.update(['_mx_space_formula', '_mx_apply_formula'])
+                itemspace_methods += space_formula + '\n' + textwrap.dedent("""
+
+                def _mx_apply_formula(self, *args, **kwargs):
+                    result = self._parent._mx_space_formula(*args, **kwargs)
+                    if result is None:
+                        return
+                    if type(result) is not dict or set(result) != {'refs'}:
+                        raise ValueError('Exported Space formula must return only dynamic References')
+                    refs = result['refs']
+                    if type(refs) is not dict or refs.keys() - {dynamic_refs}:
+                        raise ValueError('Unexpected dynamic Reference')
+                    for name, value in refs.items():
+                        setattr(self, name, value)
+                """).replace('{dynamic_refs}', repr(tuple(dynamic_refs)))
             if space._impl.collect_over_spec is not None:
                 if len(space._impl.collect_over_spec) != 1:
                     raise ValueError("export supports one collect parameter")
@@ -891,6 +948,8 @@ class SpaceTranslator(ParentTranslator):
                     raise ValueError(
                         "export collect domain must be a Cell or Reference "
                         "owned by the collection Space")
+                itemspace_dict += '\nself._mx_collect_cache = {}'
+                slot_names.append('_mx_collect_cache')
                 collect_params = [
                     param for name, param in space.formula.signature.parameters.items()
                     if name != loop_name]
@@ -903,7 +962,8 @@ class SpaceTranslator(ParentTranslator):
                 itemspace_methods += textwrap.dedent("""\
                 def collect(self{comma}{signature}):
                     return _mx_sys.collect_from_space(
-                        self, {domain}, {parameter!r}, ({names}), ({args}))
+                        self, {domain}, {parameter!r}, ({names}), ({args}),
+                        cache=self._mx_collect_cache)
 
                 """).format(domain=domain_expr, parameter=loop_name,
                             comma=', ' if collect_signature else '',
@@ -920,6 +980,10 @@ class SpaceTranslator(ParentTranslator):
         # _mx_copy_params on the enclosing ItemSpace roots assigns their
         # parameters here as well. See inherited_param_names.
         slot_names.extend(self.inherited_param_names(space))
+        ref_assigns = self.ref_assigns(space)
+        for name in dynamic_refs:
+            if name not in space.refs:
+                ref_assigns += '\nself.' + name + ' = None'
 
         return self.class_template.format(
             name=space.name,
@@ -932,7 +996,7 @@ class SpaceTranslator(ParentTranslator):
             cache_vars=textwrap.indent("\n".join(cache_vars), ' ' * 8),
             ref_copies=textwrap.indent(
                 self.ref_copies(space), ' ' * 8),
-            ref_assigns=textwrap.indent(self.ref_assigns(space), ' ' * 8),
+            ref_assigns=textwrap.indent(ref_assigns, ' ' * 8),
             methods=textwrap.indent(trans.transformed.code, ' ' * 4),
             cache_methods=textwrap.indent(''.join(cache_methods), ' ' * 4),
             itemspace_methods=textwrap.indent(itemspace_methods, ' ' * 4),
