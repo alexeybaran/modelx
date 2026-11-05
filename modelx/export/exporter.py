@@ -536,12 +536,16 @@ class ModelTranslator(ParentTranslator):
             # Created before the Spaces, whose __init__ copies the reference.
             space_assigns = self.lock_init + space_assigns
 
-        return self.class_template.format(
+        result = self.class_template.format(
             name=self.parent.name,
             space_assigns=textwrap.indent(space_assigns, ' ' * 8),
             space_dict=textwrap.indent(self.space_dict(self.parent), ' ' * 8),
             ref_assigns=textwrap.indent(self.ref_assigns(self.parent), ' ' * 8)
         )
+        if self.use_lock:
+            result += ('\n    def _mx_collect_parallel_allowed(self):\n'
+                       '        return not self._mx_lock._is_owned()\n')
+        return result
 
     def space_assigns(self, parent):
         result = []

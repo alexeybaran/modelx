@@ -1,5 +1,6 @@
 import sys
 import collections
+import threading
 import pickle
 from importlib import import_module
 import pathlib
@@ -187,6 +188,10 @@ def _mx_collect_check_shape(expected, value, path):
         _mx_collect_check_shape(expected[name], item, path + (name,))
 
 
+_mx_parallel_workers = 1
+_mx_collect_context = threading.local()
+
+
 def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None):
     """Evaluate an exported collection without retaining policy ItemSpaces."""
 
@@ -212,10 +217,60 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
                 return found
 
     if evaluate is None:
-        result = _mx_collect_evaluate(base, coords, loop_name, names, args)
+        can_parallel = getattr(base._model, '_mx_collect_parallel_allowed', None)
+        # A shared Cell may call collect while holding the model lock. Keep
+        # that nested calculation on the owning thread to avoid a lock wait cycle.
+        if (_mx_parallel_workers > 1 and len(coords) > 1
+                and not getattr(_mx_collect_context, 'active', False)
+                and (can_parallel is None or can_parallel())):
+            result = _mx_collect_parallel(base, coords, loop_name, names, args)
+        else:
+            result = _mx_collect_evaluate(base, coords, loop_name, names, args)
     else:
         result = evaluate()
     return result if cache is None else cache.setdefault(key, result)
+
+
+def _mx_collect_parallel(base, coords, loop_name, names, args):
+    from concurrent.futures import ThreadPoolExecutor
+
+    workers = min(_mx_parallel_workers, len(coords))
+    chunks = [coords[i * len(coords) // workers:(i + 1) * len(coords) // workers]
+              for i in range(workers)]
+    result = None
+    individual_shape = None
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args)
+                   for chunk in chunks]
+        # Merge in domain order too, so an earlier shape error precedes a
+        # later worker's formula error. The executor joins all workers on exit.
+        for future in futures:
+            fields = future.result()._fields
+            if result is None:
+                modes = tuple(fields)
+                result = {mode: OrderedDict() if mode == 'individual' else None for mode in modes}
+            elif tuple(fields) != modes:
+                raise ValueError('collect_outputs modes changed between policies')
+            for mode, values in fields.items():
+                if mode == 'individual':
+                    for coordinate, item in values.items():
+                        if individual_shape is None:
+                            individual_shape = _mx_collect_shape(item._fields)
+                        else:
+                            _mx_collect_check_shape(individual_shape, item._fields, (mode,))
+                        result[mode][coordinate] = item
+                else:
+                    result[mode] = _mx_collect_sum(result[mode], values._fields, (mode,))
+    return CollectResult({mode: value if mode == 'individual' else CollectResult(value)
+                          for mode, value in result.items()})
+
+
+def _mx_collect_chunk(base, coords, loop_name, names, args):
+    _mx_collect_context.active = True
+    try:
+        return _mx_collect_evaluate(base, coords, loop_name, names, args)
+    finally:
+        _mx_collect_context.active = False
 
 
 def _mx_collect_evaluate(base, coords, loop_name, names, args):
