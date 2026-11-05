@@ -206,43 +206,58 @@ def collect_from_space(base, domain, loop_name, names, args):
         values = dict(zip(names, args))
         values[loop_name] = coordinate
         root = base.__class__(base)
-        for space, template in zip(root._mx_walk(), base._mx_walk()):
-            space._mx_copy_refs(template, base)
-            for previous_root in base._mx_roots:
-                previous_root._mx_copy_params(space)
-            base._mx_assign_params(space, **values)
-            space._mx_roots.extend(base._mx_roots)
-            space._mx_roots.append(root)
-            attach = getattr(space, '_mx_collect_attach', None)
-            if attach is not None:
-                attach(scratch, template)
-        outputs = root.collect_outputs()
-        if type(outputs) is not dict or not outputs or set(outputs) - {'individual', 'sum'}:
-            raise ValueError('collect_outputs must declare individual and/or sum')
-        if modes is None:
-            modes = tuple(outputs)
-            result = {mode: None for mode in modes}
-        elif tuple(outputs) != modes:
-            raise ValueError('collect_outputs modes changed between policies')
-        for mode, items in outputs.items():
-            if type(items) is not dict or not items or any(type(name) is not str for name in items):
-                raise TypeError('collect_outputs sections need named values')
-            items = _mx_collect_detach(items)
-            if mode == 'individual':
-                shape = {name: _mx_collect_shape(item)
-                         for name, item in items.items()}
-                if individual_shape is None:
-                    individual_shape = shape
-                    result[mode] = OrderedDict()
+        releases = []
+        complete = False
+        try:
+            for space, template in zip(root._mx_walk(), base._mx_walk()):
+                space._mx_copy_refs(template, base)
+                for previous_root in base._mx_roots:
+                    previous_root._mx_copy_params(space)
+                base._mx_assign_params(space, **values)
+                space._mx_roots.extend(base._mx_roots)
+                space._mx_roots.append(root)
+                release = getattr(space, '_mx_collect_release', None)
+                if release is not None:
+                    releases.append((release, template))
+                attach = getattr(space, '_mx_collect_attach', None)
+                if attach is not None:
+                    attach(scratch, template)
+            outputs = root.collect_outputs()
+            if type(outputs) is not dict or not outputs or set(outputs) - {'individual', 'sum'}:
+                raise ValueError('collect_outputs must declare individual and/or sum')
+            if modes is None:
+                modes = tuple(outputs)
+                result = {mode: None for mode in modes}
+            elif tuple(outputs) != modes:
+                raise ValueError('collect_outputs modes changed between policies')
+            for mode, items in outputs.items():
+                if type(items) is not dict or not items or any(type(name) is not str for name in items):
+                    raise TypeError('collect_outputs sections need named values')
+                items = _mx_collect_detach(items)
+                if mode == 'individual':
+                    shape = {name: _mx_collect_shape(item)
+                             for name, item in items.items()}
+                    if individual_shape is None:
+                        individual_shape = shape
+                        result[mode] = OrderedDict()
+                    else:
+                        _mx_collect_check_shape(individual_shape, items, (mode,))
+                    result[mode][coordinate] = CollectResult(items)
                 else:
-                    _mx_collect_check_shape(individual_shape, items, (mode,))
-                result[mode][coordinate] = CollectResult(items)
-            else:
-                result[mode] = _mx_collect_sum(result[mode], items, (mode,))
-        for space, template in zip(root._mx_walk(), base._mx_walk()):
-            release = getattr(space, '_mx_collect_release', None)
-            if release is not None:
-                release(scratch, template)
+                    result[mode] = _mx_collect_sum(result[mode], items, (mode,))
+            complete = True
+        finally:
+            cleanup_error = None
+            for release, template in releases:
+                try:
+                    release(scratch, template)
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            if not complete or cleanup_error is not None:
+                scratch.clear()
+            if complete and cleanup_error is not None:
+                raise cleanup_error
         del root
 
     return CollectResult({
