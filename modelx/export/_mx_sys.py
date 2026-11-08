@@ -189,10 +189,16 @@ def _mx_collect_check_shape(expected, value, path):
 
 
 _mx_parallel_workers = 1
+_mx_collect_adapter_version = 1
 _mx_collect_context = threading.local()
 
 
-def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None):
+def _mx_collect_native_coords(coords):
+    return all(type(coord) is int and -(1 << 63) <= coord < (1 << 63) for coord in coords)
+
+
+def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None,
+                       evaluate_serial=None, reuse_in_parallel=False, private_ordered=False):
     """Evaluate an exported collection without retaining policy ItemSpaces."""
 
     if len(names) != len(args) or loop_name in names:
@@ -216,6 +222,16 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
             if found is not None:
                 return found
 
+    if (evaluate_serial is not None and _mx_parallel_workers == 1
+            and not getattr(_mx_collect_context, 'active', False)
+            and sys.gettrace() is None and sys.getprofile() is None):
+        _mx_collect_context.active = True
+        try:
+            result = evaluate_serial(coords)
+        finally:
+            _mx_collect_context.active = False
+        if result is not None:
+            return result if cache is None else cache.setdefault(key, result)
     if evaluate is None:
         can_parallel = getattr(base._model, '_mx_collect_parallel_allowed', None)
         # A shared Cell may call collect while holding the model lock. Keep
@@ -223,7 +239,12 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
         if (_mx_parallel_workers > 1 and len(coords) > 1
                 and not getattr(_mx_collect_context, 'active', False)
                 and (can_parallel is None or can_parallel())):
-            result = _mx_collect_parallel(base, coords, loop_name, names, args)
+            private = None
+            if (reuse_in_parallel and evaluate_serial is not None
+                    and sys.gettrace() is None and sys.getprofile() is None
+                    and _mx_collect_native_coords(coords)):
+                private = evaluate_serial
+            result = _mx_collect_parallel(base, coords, loop_name, names, args, private, private_ordered)
         else:
             result = _mx_collect_evaluate(base, coords, loop_name, names, args)
     else:
@@ -231,7 +252,7 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
     return result if cache is None else cache.setdefault(key, result)
 
 
-def _mx_collect_parallel(base, coords, loop_name, names, args):
+def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, private_ordered=False):
     from concurrent.futures import ThreadPoolExecutor
 
     workers = min(_mx_parallel_workers, len(coords))
@@ -240,11 +261,19 @@ def _mx_collect_parallel(base, coords, loop_name, names, args):
     result = None
     individual_shape = None
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args)
+        futures = [executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args, private)
                    for chunk in chunks]
-        # Merge in domain order too, so an earlier shape error precedes a
-        # later worker's formula error. The executor joins all workers on exit.
+        # Only private scalar chunks may merge in completion order.
+        ordered_futures = futures
+        if private is not None and not private_ordered:
+            from concurrent.futures import as_completed
+            futures = as_completed(futures)
         for future in futures:
+            if private is not None and future.exception() is not None:
+                # Keep successful scalar merging in completion order, but
+                # propagate the first failure in original domain order.
+                for ordered_future in ordered_futures:
+                    ordered_future.result()
             fields = future.result()._fields
             if result is None:
                 modes = tuple(fields)
@@ -265,9 +294,13 @@ def _mx_collect_parallel(base, coords, loop_name, names, args):
                           for mode, value in result.items()})
 
 
-def _mx_collect_chunk(base, coords, loop_name, names, args):
+def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
     _mx_collect_context.active = True
     try:
+        if private is not None:
+            result = private(coords)
+            if result is not None:
+                return result
         return _mx_collect_evaluate(base, coords, loop_name, names, args)
     finally:
         _mx_collect_context.active = False

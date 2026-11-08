@@ -2,9 +2,42 @@ from importlib import import_module
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import modelx as mx
 import pytest
+
+
+@pytest.mark.parametrize('workers,ordered,expected', [(1, False, 10.0), (4, False, 8.0), (4, True, 9.0)])
+def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ordered, expected):
+    from concurrent import futures
+    from modelx.export import _mx_sys as runtime
+    assert runtime._mx_collect_adapter_version == 1
+    monkeypatch.setattr(runtime, '_mx_parallel_workers', workers)
+    monkeypatch.setattr(futures, 'as_completed', lambda tasks: (tasks[i] for i in (2, 0, 1, 3)))
+    values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
+    base = SimpleNamespace(_model=SimpleNamespace())
+    failure = LookupError('retry')
+    failing = True
+    def evaluate(coords):
+        if failing:
+            raise failure
+        total = values[coords[0]]
+        for index in coords[1:]:
+            total += values[index]
+        return runtime.CollectResult({'sum': runtime.CollectResult({'value': total})})
+    cache = {}
+    def collect():
+        return runtime.collect_from_space(base, range(8), 'key', (), (), cache=cache,
+            evaluate_serial=evaluate, reuse_in_parallel=True, private_ordered=ordered)
+    with pytest.raises(LookupError) as error:
+        collect()
+    assert error.value is failure and not cache
+    assert not getattr(runtime._mx_collect_context, 'active', False)
+    failing = False
+    result = collect()
+    assert result.sum.value == expected
+    assert collect() is result
 
 
 @pytest.mark.parametrize('workers', [1, 2, 4])
