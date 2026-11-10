@@ -45,6 +45,7 @@ What Next
    spyder
    tutorial/index
    reference/index
+   helpers/index
 
 * :ref:`genindex`
 * :ref:`search`
