@@ -14,7 +14,9 @@
 
 import ast
 import collections
+import keyword
 import pathlib
+import symtable
 import sys
 import textwrap
 import types
@@ -184,26 +186,94 @@ def get_space_formula_attrs(space: BaseSpace):
     return get_func_attrs(src)
 
 
+def _space_formula_nodes(body):
+    for node in body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield node
+            yield from _space_formula_nodes(ast.iter_child_nodes(node))
+
+
+def _dynamic_ref_names(space, source, definition, ref_names):
+    """Find all possible Reference names without evaluating the formula."""
+    nodes = list(_space_formula_nodes(definition.body))
+    bindings = collections.defaultdict(list)
+    uses = collections.defaultdict(set)
+    for node in nodes:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                bindings[target.id].append((target, node.value))
+    for node in ast.walk(definition):
+        if isinstance(node, ast.Name):
+            uses[node.id].add(node)
+
+    scope = next(child for child in symtable.symtable(source, '<Space formula>', 'exec').get_children()
+                 if child.get_name() == definition.name and child.get_lineno() == definition.lineno)
+    builtin = scope.lookup('dict') if 'dict' in scope.get_identifiers() else None
+    dict_is_builtin = (
+        'dict' not in set(ref_names) | set(space.parameters)
+        | set(space.cells) | set(space.spaces)
+        and (builtin is None or builtin.is_global() and not builtin.is_declared_global())
+    )
+    error = (
+        f"Cannot export Space formula for {space.fullname}: "
+        "return None or a dict whose 'refs' maps statically named References"
+    )
+    resolved_uses = collections.defaultdict(set)
+
+    def mappings(expr, resolving=frozenset()):
+        if expr is None or isinstance(expr, ast.Constant) and expr.value is None:
+            return
+        if isinstance(expr, ast.Dict) and all(
+            isinstance(key, ast.Constant) and isinstance(key.value, str)
+            for key in expr.keys
+        ):
+            yield dict(zip((key.value for key in expr.keys), expr.values))
+        elif (dict_is_builtin and isinstance(expr, ast.Call)
+              and isinstance(expr.func, ast.Name) and expr.func.id == 'dict'
+              and not expr.args and all(kw.arg is not None for kw in expr.keywords)):
+            yield {kw.arg: kw.value for kw in expr.keywords}
+        elif isinstance(expr, ast.Name) and expr.id in bindings and expr.id not in resolving:
+            resolved_uses[expr.id].add(expr)
+            for target, value in bindings[expr.id]:
+                resolved_uses[expr.id].add(target)
+                yield from mappings(value, resolving | {expr.id})
+        else:
+            raise ValueError(error)
+
+    keys = set()
+    for node in nodes:
+        if isinstance(node, ast.Return):
+            for params in mappings(node.value):
+                if params.keys() - {'refs'}:
+                    raise ValueError(error)
+                for refs in mappings(params.get('refs')):
+                    keys.update(refs)
+
+    # A mapping can be changed by other uses or bound by non-assignment syntax
+    # such as an import, an exception target or a pattern capture.
+    other_bindings = {name for node in nodes
+                      for name in (getattr(node, 'name', None), getattr(node, 'rest', None))
+                      if isinstance(name, str)}
+    for name, resolved in resolved_uses.items():
+        symbol = scope.lookup(name)
+        if (not symbol.is_local() or symbol.is_parameter() or symbol.is_imported()
+                or symbol.is_namespace() or name in other_bindings or uses[name] - resolved):
+            raise ValueError(error)
+    if any(not key.isidentifier() or key.startswith('_') or keyword.iskeyword(key)
+           for key in keys):
+        raise ValueError(error)
+    return keys
+
+
 def dynamic_ref_formula(space, cells, ref_names):
     """Render Space formulas that declare named per-ItemSpace References."""
     source = space.formula.source
     if is_lambda_expr(source):
         source = lambda_to_func(source, '_formula')
-    name = get_func_attrs(source).name
-    keys = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
-            continue
-        for key, value in zip(node.value.keys, node.value.values):
-            if not isinstance(key, ast.Constant) or key.value != 'refs':
-                continue
-            if not isinstance(value, ast.Dict) or any(
-                not isinstance(k, ast.Constant) or type(k.value) is not str
-                or not k.value.isidentifier() or k.value.startswith('_')
-                for k in value.keys
-            ):
-                raise ValueError('Exported Space formula must name its dynamic References')
-            keys.update(k.value for k in value.keys)
+    definition, = ast.parse(source).body
+    name = definition.name
+    keys = _dynamic_ref_names(space, source, definition, ref_names)
     if not keys:
         return '', ()
     if keys & (set(space.parameters) | set(space.cells) | set(space.spaces)):
@@ -928,9 +998,11 @@ class SpaceTranslator(ParentTranslator):
                     result = self._parent._mx_space_formula(*args, **kwargs)
                     if result is None:
                         return
-                    if type(result) is not dict or set(result) != {'refs'}:
+                    if not isinstance(result, dict) or result.keys() - {'refs'}:
                         raise ValueError('Exported Space formula must return only dynamic References')
-                    refs = result['refs']
+                    refs = result.get('refs')
+                    if refs is None:
+                        return
                     if type(refs) is not dict or refs.keys() - {dynamic_refs}:
                         raise ValueError('Unexpected dynamic Reference')
                     for name, value in refs.items():
