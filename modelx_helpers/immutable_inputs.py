@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 
+_MISSING = object()
+
+
 class Record(Mapping):
     __slots__ = ('_items', '_index', '_native_groups', '_metadata', '_preserve_scalar_types')
 
@@ -31,6 +34,20 @@ class Record(Mapping):
     def __getitem__(self, key):
         return self._index[key]
 
+    def lookup_enum(self, key, enum_type, *, default=_MISSING):
+        """Resolve a stored label to its enum member with an optional default."""
+        try:
+            return enum_type[self[key]]
+        except (KeyError, TypeError):
+            if default is _MISSING:
+                raise
+            return default
+
+    def slice(self, key, *keys):
+        """Follow group keys, optionally ending at a prepared row."""
+        value = self[key]
+        return value.slice(*keys) if keys else value
+
     def __iter__(self):
         return iter(self._index)
 
@@ -49,6 +66,30 @@ class Record(Mapping):
 
     def __deepcopy__(self, memo):
         return self
+
+
+class _TableIndex:
+    """Read-only view of the table's complete row keys in input order."""
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __contains__(self, key):
+        return self._table.contains(key)
+
+    def __iter__(self):
+        return iter(self._table._keys)
+
+    def __len__(self):
+        return len(self._table._keys)
+
+    def max_int(self) -> int:
+        return int(max(self._table._keys))
+
+    def max_float(self) -> float:
+        return float(max(self._table._keys))
 
 
 class Table(Mapping):
@@ -123,6 +164,38 @@ class Table(Mapping):
         column = self._columns.index(column) if isinstance(column, str) else column
         return self._values[position][column]
 
+    def lookup_float(self, key, column, default=_MISSING) -> float:
+        """Read a table value using the typed float lookup contract."""
+        from .typed_inputs import lookup_float
+
+        return lookup_float(self, key, column, default)
+
+    def lookup_int(self, key, column, default=_MISSING) -> int:
+        """Read a table value using the typed integer lookup contract."""
+        from .typed_inputs import lookup_int
+
+        return lookup_int(self, key, column, default)
+
+    def interpolate_float(self, key, column) -> float:
+        """Interpolate adjacent integer rows and hold the final row above its key."""
+        from math import floor
+
+        lower = int(floor(key))
+        last = self.index.max_int()
+        if lower >= last:
+            return self.lookup_float(last, column)
+        start = self.lookup_float(lower, column)
+        end = self.lookup_float(lower + 1, column)
+        return start + (end - start) * (key - lower)
+
+    def slice(self, key) -> Record:
+        """Select a row with the pandas row metadata captured at preparation."""
+        from .table_operations import row
+
+        return row(self, key)
+
+    row = slice
+
     def previous(self, key, column):
         if self._ordered is None:
             raise TypeError('predecessor lookup requires ordered keys')
@@ -136,6 +209,11 @@ class Table(Mapping):
             return key in self._positions
         return (_valid_index_key(key, self._index_error)
                 and _index_key(key, self._index_error) in self._positions)
+
+    @property
+    def index(self):
+        """The table's complete row keys in their original order."""
+        return _TableIndex(self)
 
     def __reduce__(self):
         args = (self._keys, self._values, self._columns)

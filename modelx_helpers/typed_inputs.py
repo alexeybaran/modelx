@@ -2,10 +2,9 @@
 
 from bisect import bisect_right
 import math
-from .immutable_inputs import Table
+from .immutable_inputs import Table, _MISSING
 
 
-_MISSING = object()
 _FLOOR = math.floor
 
 

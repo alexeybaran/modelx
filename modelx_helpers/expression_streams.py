@@ -1,5 +1,7 @@
 """Explicit lazy expression helpers; Cython providers never inspect formulas."""
 
+from .typed_inputs import all_true, sum_f64
+
 
 _DOMAIN_MISSING = object()
 _NO_CALLBACK = object()

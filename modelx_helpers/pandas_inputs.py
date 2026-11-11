@@ -13,6 +13,15 @@ import pandas as pd
 from .immutable_inputs import Record, Table, freeze
 
 
+def isna(value):
+    """Test for missing values with pandas scalar and array semantics."""
+    return pd.isna(value)
+
+
+isna.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'isna')
+isna.__modelx_cython_scalar_result__ = 'object'
+
+
 def _scalar(value):
     # itertuples preserves per-column scalar values; iterrows would coerce a
     # numeric mixed row to one dtype before the explicit preparation boundary.
@@ -121,20 +130,27 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
 
 
 def _report_metadata(frame, *, rows, preserve_scalar_types):
-    # Preserve row coercion separately from per-column scalar selection. This
-    # is preparation only; public calculation/selection stays outside output.
-    row_values, row_dtypes, row_names = [], [], []
+    # Own row Records here so policy calculations can read the prepared row.
+    columns = frame.columns.copy(deep=True)
+    attrs = deepcopy(frame.attrs)
+    allows_duplicates = frame.flags.allows_duplicate_labels
+    row_values, row_records, row_dtypes, row_names = [], [], [], []
     if rows:
         for position in range(len(frame)):
             public_row = frame.iloc[position]
-            row_values.append(tuple(public_row[name] if preserve_scalar_types
-                                    else freeze(public_row[name]) for name in frame.columns))
+            selected = Record({name: public_row[name] for name in columns},
+                              preserve_scalar_types=preserve_scalar_types)
+            object.__setattr__(selected, '_metadata', ('row', columns, public_row.dtype,
+                                                       public_row.name, attrs, allows_duplicates))
+            row_values.append(tuple(value for _, value in selected._items))
+            row_records.append(selected)
             row_dtypes.append(public_row.dtype)
             row_names.append(public_row.name)
-    return ('frame', frame.index.copy(deep=True), frame.columns.copy(deep=True),
+    return ('frame', frame.index.copy(deep=True), columns,
             tuple(frame.dtypes), tuple(row_values) if rows else None,
-            tuple(row_dtypes), deepcopy(frame.attrs), frame.flags.allows_duplicate_labels,
-            tuple(row_names), (frame.columns.dtype, frame.columns.name))
+            tuple(row_dtypes), attrs, allows_duplicates,
+            tuple(row_names), (frame.columns.dtype, frame.columns.name),
+            tuple(row_records) if rows else None)
 
 
 def records(frame):

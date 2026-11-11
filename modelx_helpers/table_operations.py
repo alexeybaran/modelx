@@ -34,8 +34,9 @@ def row(table, key):
         position = table._positions[_index_key(key, table._index_error)]
     except KeyError:
         raise KeyError(_index_error_key(key, table._index_error)) from None
-    # Metadata is already owned. Avoid freezing the scalars a second time; this
-    # preserves pandas scalar identity, including nullable missing singletons.
+    if len(metadata) > 10 and metadata[10] is not None:
+        return metadata[10][position]
+    # Older tables only have scalar tuples.
     result = object.__new__(Record)
     items = tuple(zip(table._columns, metadata[4][position]))
     object.__setattr__(result, '_items', items)
