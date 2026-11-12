@@ -172,11 +172,13 @@ lookup.__modelx_cython_bounded__ = 'bounded_lookup_f64'
 previous.__modelx_cython_numeric__ = 'previous_f64'
 
 lookup.__modelx_cython_bound_numeric__ = (
-    'numeric_resource_ready', 'bound_lookup_f64', 'prepare_lookup_f64', 'numeric_binding_ready',
+    'numeric_resource_ready', 'bound_lookup_f64', 'prepare_lookup_f64',
 )
 previous.__modelx_cython_bound_numeric__ = (
-    'numeric_resource_ready', 'bound_previous_f64', 'prepare_previous_f64', 'numeric_binding_ready',
+    'numeric_resource_ready', 'bound_previous_f64', 'prepare_previous_f64',
 )
+lookup.__modelx_cython_bound_numeric_namespace__ = 'numeric_binding_ready'
+previous.__modelx_cython_bound_numeric_namespace__ = 'numeric_binding_ready'
 
 lookup.__modelx_cython_bound_bounded__ = 'bound_bounded_f64'
 lookup.__modelx_cython_bound_grouped__ = ('bound_group_probe', 'bound_group_value', 'group_context_value')
