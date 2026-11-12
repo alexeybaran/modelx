@@ -145,7 +145,10 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
             leaf_spec = index_error
             if groups:
                 leaf_index = axes[1].take(positions).droplevel(grouped_positions)
-                leaf_spec = _pandas_index_spec(leaf_index)
+                # Reconstruction axes are separate from scalar selection.
+                # Plain grouped leaves use ordinary Table keys.
+                if rows or report:
+                    leaf_spec = _pandas_index_spec(leaf_index)
             result = Table([entry[0] for entry in branch],
                            [entry[1] for entry in branch], selected, leaf_spec,
                            preserve_scalar_types=preserve_scalar_types)

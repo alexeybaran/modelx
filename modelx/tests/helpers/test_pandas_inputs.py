@@ -152,14 +152,19 @@ def test_public_record_and_records_materialize_original_labels():
     assert to_pandas(records[7])['count'] == 2**53 + 1
 
 
-def test_grouped_plain_leaf_retains_boolean_key_validation():
-    frame = pd.DataFrame({'rate': [0.1]}, index=pd.MultiIndex.from_tuples(
-        [('M', 1)], names=['sex', 'age']))
-    leaf = inputs.table(frame, groups=('sex',))['M']
-    assert h.lookup(leaf, 1, 'rate') == 0.1
+@pytest.mark.parametrize('options', [{}, {'report': True}, {'rows': True}])
+def test_grouped_leaf_keeps_lookup_policy_when_owning_pandas_axes(options):
+    frame = pd.DataFrame({'rate': [0.4, 0.1]}, index=pd.MultiIndex.from_tuples(
+        [('M', 4), ('M', 1)], names=['sex', 'age']))
+    grouped = inputs.table(frame, groups=('sex',), **options)
+    leaf = grouped['M']
+    pd.testing.assert_frame_equal(to_pandas(grouped), frame)
+    pd.testing.assert_frame_equal(to_pandas(leaf), frame.xs('M', level='sex'))
+    assert h.previous(leaf, 3, 'rate') == 0.1
+    assert h.lookup(leaf, 2, 'rate', 0.0) == 0.0
     for key in (True, np.bool_(True)):
-        assert h.lookup(leaf, key, 'rate', 0.0) == 0.0
-        assert not h.contains(leaf, key)
+        assert h.lookup(leaf, key, 'rate', 0.0) == (0.0 if options else 0.1)
+        assert h.contains(leaf, key) is (not options)
 
 
 def test_frozen_pandas_object_cells_restore_original_container_values():
