@@ -93,7 +93,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         raise ValueError('table columns must be nonempty strings')
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
-    selected_frame = frame.loc[:, selected]
+    selected_frame = frame if columns is None and type(frame) is pd.DataFrame else frame.loc[:, selected]
     dtypes = tuple(selected_frame.dtypes)
     object_columns = tuple(i for i, dtype in enumerate(dtypes)
                            if getattr(dtype, 'kind', None) == 'O'
