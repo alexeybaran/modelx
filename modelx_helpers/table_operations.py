@@ -6,8 +6,7 @@ selection has direct Cython provider declarations, without formula recognition.
 from copy import deepcopy
 from types import MappingProxyType
 
-from .immutable_inputs import (Table, Record, _index_key, _index_error_key,
-                               _valid_index_key)
+from .immutable_inputs import Table, Record, _copy_container, _index_key, _valid_index_key
 
 _MISSING = object()
 
@@ -33,7 +32,7 @@ def row(table, key):
             raise KeyError(key)
         position = table._positions[_index_key(key, table._index_error)]
     except KeyError:
-        raise KeyError(_index_error_key(key, table._index_error)) from None
+        raise KeyError(key) from None
     if len(metadata) > 10 and metadata[10] is not None:
         return metadata[10][position]
     # Older tables only have scalar tuples.
@@ -76,57 +75,125 @@ def column(table, name, *, report=False):
     object.__setattr__(result, '_native_groups', {})
     object.__setattr__(result, '_preserve_scalar_types',
                        getattr(table, '_preserve_scalar_types', False))
-    object.__setattr__(result, '_metadata', ('series', meta[1], meta[3][position],
-                                          name, meta[6], meta[7]))
+    metadata = ('series', meta[1], meta[3][position], name, meta[6], meta[7])
+    if len(meta) > 11:
+        containers = {i: values[position] for i, values in meta[11].items()
+                      if position in values}
+        if containers:
+            metadata = (*metadata, containers)
+    object.__setattr__(result, '_metadata', metadata)
     return result
 
 
+def _axis(spec):
+    import pandas as pd
+    if type(spec) is tuple and spec[0] == 'labels':
+        return pd.Index(spec[1], name=spec[2], dtype=spec[3], tupleize_cols=False)
+    if type(spec) is tuple and spec[0] == 'range':
+        return pd.RangeIndex(spec[1], spec[2], spec[3], name=spec[4])
+    return spec.copy(deep=True)
+
+
+def _frame(values, index, columns, dtypes):
+    import numpy as np
+    import pandas as pd
+    if all(dtype == np.dtype('float64') for dtype in dtypes):
+        # Retain column-major storage used by the report reductions.
+        numbers = np.array(values, dtype='float64', order='F').reshape(
+            (len(index), len(columns)), order='F')
+        return pd.DataFrame(numbers, index=index, columns=columns, copy=False)
+    result = pd.DataFrame({name: pd.Series([row[i] for row in values],
+                           index=index, dtype=dtypes[i])
+                           for i, name in enumerate(columns)}, index=index)
+    result.columns = columns
+    return result
+
+
+def _restore_containers(values, containers):
+    return tuple(_copy_container(containers[i]) if i in containers else value
+                 for i, value in enumerate(values))
+
+
+def _table_rows(value):
+    meta = value._metadata
+    if meta is not None:
+        if meta[0] == 'frame' and len(meta) > 11:
+            containers = meta[11]
+        elif meta[0] == 'axes' and len(meta) > 4:
+            containers = meta[4]
+        else:
+            return value._values
+        return tuple(_restore_containers(row, containers[i]) if i in containers else row
+                     for i, row in enumerate(value._values))
+    return value._values
+
+
+def _record_values(value):
+    meta = value._metadata
+    values = (value._index['values'] if meta is not None and meta[0] == 'series'
+              else tuple(value._index.values()))
+    if meta is not None and meta[0] in ('row', 'series') and len(meta) > 6:
+        return _restore_containers(values, meta[6])
+    return values
+
+
+def _grouped_rows(value):
+    if isinstance(value, Table):
+        yield from _table_rows(value)
+    else:
+        for _, child in value._items:
+            yield from _grouped_rows(child)
+
+
 def to_pandas(value, *, index_name=_MISSING):
-    """Materialize owned report metadata into the public DataFrame or Series.
+    """Materialize an owned Table or Record as a pandas DataFrame or Series.
 
-    Python/pandas execution at this output boundary is explicit and timed. Row
-    and column calculations precede it. Untagged records are not guessed to be
-    report rows, and tables without preserved metadata are rejected.
-
-    A column selected with report=True restores a Series using its original
-    index, dtype and column name. No filtering, ordering or reduction occurs.
+    Frames keep the selected column and input row order. Grouped tables restore
+    their MultiIndex. Preparation options control retained report attributes
+    and row selection, while values and labels are available for every table.
     """
     import pandas as pd
-    def axis(spec):
-        if type(spec) is tuple and spec[0] == 'labels':
-            return pd.Index(spec[1], name=spec[2], dtype=spec[3])
-        if type(spec) is tuple and spec[0] == 'range':
-            return pd.RangeIndex(spec[1], spec[2], spec[3], name=spec[4])
-        return spec.copy(deep=True)
-    if type(value) is Table:
-        meta = value._metadata
-        if meta is None or meta[0] != 'frame':
-            raise ValueError('to_pandas requires table(..., report=True) metadata')
-        index, columns, dtypes = axis(meta[1]), axis(meta[2]), meta[3]
-        import numpy as np
-        if all(dtype == np.dtype('float64') for dtype in dtypes):
-            # One matrix/constructor avoids a temporary Series per column. Keep
-            # column-major storage, as in the dict-of-Series construction, so
-            # later pandas/NumPy reductions retain their numerical dispatch.
-            numbers = np.array(value._values, dtype='float64', order='F').reshape(
-                (len(index), len(columns)), order='F')
-            result = pd.DataFrame(numbers, index=index, columns=columns, copy=False)
+    if not isinstance(value, (Table, Record)):
+        owner = getattr(value, '__modelx_table_owner__', None)
+        if callable(owner):
+            value = owner()
+    if not isinstance(value, (Table, Record)):
+        raise TypeError('to_pandas requires an owned Table or Record')
+
+    meta = value._metadata
+    kind = meta[0] if meta is not None else None
+    if isinstance(value, Table):
+        if kind in ('frame', 'axes'):
+            result = _frame(_table_rows(value), _axis(meta[1]), _axis(meta[2]), meta[3])
         else:
-            result = pd.DataFrame({name: pd.Series([row[i] for row in value._values],
-                                   index=index, dtype=dtypes[i])
-                                   for i, name in enumerate(value._columns)}, index=index)
-            result.columns = columns
-        result.attrs = deepcopy(meta[6])
-        result.flags.allows_duplicate_labels = meta[7]
-    elif type(value) is Record and value._metadata is not None and value._metadata[0] in ('row', 'series'):
-        meta = value._metadata
-        values = value._index['values'] if meta[0] == 'series' else [entry[1] for entry in value._items]
-        result = pd.Series(values,
-                           index=axis(meta[1]), dtype=meta[2], name=meta[3])
+            # Tables built from Python mappings and older prepared tables
+            # carry keys and values without source axis metadata.
+            spec = value._index_error
+            if spec is not None and spec['multi']:
+                index = pd.MultiIndex.from_tuples(value._keys) if value._keys else (
+                    pd.MultiIndex.from_arrays([[] for _ in spec['boolean_modes']]))
+            else:
+                index = pd.Index(value._keys, dtype=object, tupleize_cols=False)
+            columns = pd.Index(value._columns)
+            result = _frame(value._values, index, columns, (object,) * len(columns))
+        if kind == 'frame':
+            result.attrs = deepcopy(meta[6])
+            result.flags.allows_duplicate_labels = meta[7]
+    elif kind in ('row', 'series'):
+        result = pd.Series(_record_values(value),
+                           index=_axis(meta[1]), dtype=meta[2], name=meta[3])
         result.attrs = deepcopy(meta[4])
         result.flags.allows_duplicate_labels = meta[5]
+    elif kind == 'grouped':
+        rows = tuple(_grouped_rows(value))
+        result = _frame(tuple(rows[i] for i in meta[4]), _axis(meta[1]), _axis(meta[2]), meta[3])
+    elif kind == 'records':
+        rows = tuple(_record_values(row) for _, row in value._items)
+        result = _frame(rows, _axis(meta[1]), _axis(meta[2]), meta[3])
     else:
-        raise TypeError('to_pandas requires an owned report Table or row Record')
+        result = pd.Series(list(value._index.values()),
+                           index=pd.Index(tuple(value), dtype=object, tupleize_cols=False),
+                           dtype=object)
     if index_name is not _MISSING:
         result.index = result.index.rename(index_name)
     return result

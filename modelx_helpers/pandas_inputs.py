@@ -10,7 +10,7 @@ from copy import deepcopy
 import numpy as np
 import pandas as pd
 
-from .immutable_inputs import Record, Table, freeze
+from .immutable_inputs import Record, Table, _copy_container, freeze
 
 
 def isna(value):
@@ -36,6 +36,22 @@ def _key(value):
     return _scalar(value)
 
 
+def _container_values(values, positions):
+    return {i: _copy_container(values[i]) for i in positions
+            if type(values[i]) in (list, tuple, dict)}
+
+
+def _record_metadata(result, metadata, values):
+    dtype = metadata[2]
+    if (not result._preserve_scalar_types
+            and (dtype is object or getattr(dtype, 'kind', None) == 'O')):
+        values = tuple(values)
+        containers = _container_values(values, range(len(values)))
+        if containers:
+            metadata = (*metadata, containers)
+    object.__setattr__(result, '_metadata', metadata)
+
+
 def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=False,
           preserve_scalar_types=False):
     """Build an existing Table, optionally nested in explicit group Records.
@@ -46,8 +62,8 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     duplicates or coerce every numeric column to float. Those are separate
     operations, never implicit preparation policies.
 
-    ``indexing='at'`` retains the full-scalar .at error-key encoding and boolean
-    label rules as owned metadata. It requires complete, ungrouped keys.
+    ``indexing='at'`` requires complete, ungrouped keys. Lookup errors identify
+    the requested label, and boolean labels retain pandas selection rules.
 
     The normal Table contract requires unique leaf keys and nonempty unique
     string columns. Unsupported scalar values raise rather than silently lose
@@ -56,8 +72,9 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     ``rows=True`` additionally owns pandas-style row scalar coercion for row()
     selection. Lookup-only tables omit this second matrix. Row coercion follows
     the selected columns. Grouped report/row metadata retains remaining levels.
-    ``report=True`` owns axes/dtypes/attrs for to_pandas() without row snapshots;
-    rows=True includes report metadata. Plain lookup preparation owns neither.
+    All tables own the axes and column dtypes needed by to_pandas().
+    ``report=True`` also retains attributes and enables column reports.
+    ``rows=True`` includes the report metadata and prepared rows.
 
     ``preserve_scalar_types=True`` retains actual column-selected scalar types
     and object references, deferring value conversion to selected typed lookups.
@@ -70,13 +87,17 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         raise ValueError('indexing must be loc or at')
     if indexing == 'at' and groups:
         raise ValueError('at preparation requires complete keys')
-    index_error = _at_index_spec(frame.index, encoded_errors=indexing == 'at') if not groups else None
+    index_error = _pandas_index_spec(frame.index) if not groups else None
     selected = list(frame.columns) if columns is None else list(columns)
     if not selected or any(type(name) is not str for name in selected):
         raise ValueError('table columns must be nonempty strings')
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
     selected_frame = frame.loc[:, selected]
+    dtypes = tuple(selected_frame.dtypes)
+    object_columns = tuple(i for i, dtype in enumerate(dtypes)
+                           if getattr(dtype, 'kind', None) == 'O'
+                           and not isinstance(dtype, pd.StringDtype))
     names = list(frame.index.names)
     groups = tuple(groups)
     if len(set(groups)) != len(groups):
@@ -97,12 +118,17 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                        for position in range(len(selected_frame)))
     else:
         source_rows = selected_frame.itertuples(index=False, name=None)
+    original_objects = {}
     for position, (label, row) in enumerate(zip(frame.index, source_rows)):
         parts = tuple(label) if isinstance(frame.index, pd.MultiIndex) else (label,)
         parts = tuple(_key(part) for part in parts)
         leaf_parts = tuple(parts[i] for i in remaining_positions)
         key = leaf_parts[0] if len(leaf_parts) == 1 else leaf_parts
         value = tuple(row) if preserve_scalar_types else tuple(_scalar(item) for item in row)
+        if object_columns and not preserve_scalar_types:
+            containers = _container_values(row, object_columns)
+            if containers:
+                original_objects[position] = containers
         if not groups:
             root.append((key, value, position))
             continue
@@ -111,22 +137,57 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
             branch = branch.setdefault(parts[group_position], OrderedDict())
         branch.setdefault(parts[grouped_positions[-1]], []).append((key, value, position))
 
+    axes = _axes_metadata(selected_frame, dtypes) if groups else None
+
     def build(branch, depth):
         if depth == len(groups):
-            leaf, leaf_spec = selected_frame, index_error
-            if groups and (rows or report):
-                leaf = selected_frame.iloc[[entry[2] for entry in branch]].copy(deep=False)
-                leaf.index = leaf.index.droplevel(grouped_positions)
-                leaf_spec = _at_index_spec(leaf.index, encoded_errors=False)
+            positions = [entry[2] for entry in branch] if groups else None
+            leaf_spec = index_error
+            if groups:
+                leaf_index = axes[1].take(positions).droplevel(grouped_positions)
+                leaf_spec = _pandas_index_spec(leaf_index)
             result = Table([entry[0] for entry in branch],
                            [entry[1] for entry in branch], selected, leaf_spec,
                            preserve_scalar_types=preserve_scalar_types)
             if rows or report:
-                object.__setattr__(result, '_metadata', _report_metadata(
-                    leaf, rows=rows, preserve_scalar_types=preserve_scalar_types))
-            return result
-        return Record({key: build(value, depth + 1) for key, value in branch.items()})
-    return build(root, 0)
+                leaf = selected_frame
+                if groups:
+                    leaf = selected_frame.iloc[positions].copy(deep=False)
+                    leaf.index = leaf_index
+                metadata = _report_metadata(leaf, rows=rows,
+                                            preserve_scalar_types=preserve_scalar_types)
+            else:
+                metadata = ('axes', leaf_index, *axes[2:]) if groups else _axes_metadata(selected_frame, dtypes)
+            if original_objects:
+                containers = ({i: original_objects[pos] for i, pos in enumerate(positions)
+                               if pos in original_objects} if groups else original_objects)
+                if containers:
+                    metadata = (*metadata, containers)
+            object.__setattr__(result, '_metadata', metadata)
+            return result, positions
+
+        children = {}
+        positions = []
+        for key, child in branch.items():
+            children[key], child_positions = build(child, depth + 1)
+            positions.extend(child_positions)
+        result = Record(children)
+        # The tree groups rows together. Retain a permutation to restore
+        # input order, including interleaved groups and non-leading levels.
+        order = tuple(sorted(range(len(positions)), key=positions.__getitem__))
+        index = axes[1]
+        if depth:
+            index = index.take([positions[i] for i in order]).droplevel(grouped_positions[:depth])
+        object.__setattr__(result, '_metadata', ('grouped', index, *axes[2:], order))
+        return result, positions
+
+    return build(root, 0)[0]
+
+
+def _axes_metadata(frame, dtypes=None):
+    if dtypes is None:
+        dtypes = tuple(frame.dtypes)
+    return ('axes', frame.index.copy(deep=True), frame.columns.copy(deep=True), dtypes)
 
 
 def _report_metadata(frame, *, rows, preserve_scalar_types):
@@ -138,10 +199,11 @@ def _report_metadata(frame, *, rows, preserve_scalar_types):
     if rows:
         for position in range(len(frame)):
             public_row = frame.iloc[position]
-            selected = Record({name: public_row[name] for name in columns},
+            values = {name: public_row[name] for name in columns}
+            selected = Record(values,
                               preserve_scalar_types=preserve_scalar_types)
-            object.__setattr__(selected, '_metadata', ('row', columns, public_row.dtype,
-                                                       public_row.name, attrs, allows_duplicates))
+            _record_metadata(selected, ('row', columns, public_row.dtype,
+                                        public_row.name, attrs, allows_duplicates), values.values())
             row_values.append(tuple(value for _, value in selected._items))
             row_records.append(selected)
             row_dtypes.append(public_row.dtype)
@@ -162,9 +224,15 @@ def records(frame):
     columns = tuple(frame.columns)
     if not frame.columns.is_unique:
         raise ValueError('record columns must be unique')
-    return Record({_key(key): Record({column: _scalar(value)
-                   for column, value in zip(columns, row)})
-                   for key, row in zip(frame.index, frame.itertuples(index=False, name=None))})
+    axes = _axes_metadata(frame)
+    result = {}
+    for key, row in zip(frame.index, frame.itertuples(index=False, name=None)):
+        owned = Record({column: _scalar(value) for column, value in zip(columns, row)})
+        _record_metadata(owned, ('row', axes[2], object, key, {}, True), row)
+        result[_key(key)] = owned
+    owned = Record(result)
+    object.__setattr__(owned, '_metadata', ('records', *axes[1:]))
+    return owned
 
 
 def record(row, *, preserve_scalar_types=False):
@@ -183,8 +251,14 @@ def record(row, *, preserve_scalar_types=False):
     if preserve_scalar_types:
         # Series.items() can yield Python scalars while Series[key] returns a
         # numpy scalar. Preserve the actual public scalar-selection contract.
-        return Record({key: row[key] for key in row.index}, preserve_scalar_types=True)
-    return Record({key: _scalar(value) for key, value in row.items()})
+        values = {key: row[key] for key in row.index}
+        result = Record(values, preserve_scalar_types=True)
+    else:
+        values = dict(row.items())
+        result = Record({key: _scalar(value) for key, value in values.items()})
+    _record_metadata(result, ('row', row.index.copy(deep=True), row.dtype, row.name,
+                             deepcopy(row.attrs), row.flags.allows_duplicate_labels), values.values())
+    return result
 
 
 def index(labels):
@@ -205,12 +279,12 @@ def index(labels):
         return result
     return Table(keys,
                  tuple((position,) for position in range(len(labels))),
-                 ('position',), _at_index_spec(labels, encoded_errors=False))
+                 ('position',), _pandas_index_spec(labels))
 
 
 
-def _at_index_spec(index, *, encoded_errors=True):
-    """Own only the metadata required for full-scalar pandas .at semantics."""
+def _pandas_index_spec(index):
+    """Capture the label domains used by pandas scalar selection."""
     multi = isinstance(index, pd.MultiIndex)
     levels = index.levels if multi else (index,)
     modes = []
@@ -222,20 +296,10 @@ def _at_index_spec(index, *, encoded_errors=True):
             modes.append(0)
         else:
             modes.append(2)
-    # Calibrate the installed pandas encoding at preparation, not in lookup.
-    probe = pd.MultiIndex.from_tuples([('a', 0)])
-    bias = int(probe._engine.values[0]) >> int(probe._engine.offsets[0])
-    owned_levels = tuple(tuple(_key(value) for value in level) for level in levels)
-    # Build level ownership at this explicit preparation boundary. Native
-    # resource initialization must not call the Python Table constructor.
-    level_tables = tuple(Table(level, [(0.0,)] * len(level), ('position',))
-                         for level in owned_levels)
     return Record({
-        'multi': multi, 'encoded_errors': encoded_errors, 'pandas_columns': True,
+        'multi': multi, 'pandas_columns': True,
         'row_bool_labels': pd.api.types.is_bool_dtype(index.dtype),
-        'levels': owned_levels, 'level_tables': level_tables,
-        'offsets': tuple(map(int, index._engine.offsets)) if multi else (0,),
-        'boolean_modes': tuple(modes), 'bias': bias})
+        'boolean_modes': tuple(modes)})
 
 
 table.__modelx_native_operation__ = 'table'
