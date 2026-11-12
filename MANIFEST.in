@@ -1,6 +1,8 @@
 # Include the license file
 include LICENSE.txt
 include LICENSE.LESSER.txt
+recursive-include doc/source/helpers *.md *.rst
+include modelx_helpers/LICENSE.lifelib.txt
 
 # Include the data files
 recursive-include data *

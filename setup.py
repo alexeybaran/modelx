@@ -119,6 +119,8 @@ setup(
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
     install_requires=['networkx>=2.2', 'asttokens', 'libcst'],
+    extras_require={'helpers': ['pandas', 'numpy']},
+    package_data={'modelx_helpers': ['LICENSE.lifelib.txt']},
 
     # If your project only runs on certain Python versions,
     # setting the python_requires argument to the appropriate PEP 440 version

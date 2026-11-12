@@ -1,0 +1,327 @@
+"""Owned immutable records and keyed tables for model inputs.
+
+Construction is explicit: existing dictionaries and pandas objects are never
+silently frozen. Keys and authored enum objects retain their Python identity.
+The explicit preserve_scalar_types option owns structure while retaining raw
+cell references, including mutable object cells; it is a shallow snapshot.
+"""
+from bisect import bisect_right
+from collections.abc import Mapping
+from types import MappingProxyType
+
+
+_MISSING = object()
+
+
+class Record(Mapping):
+    __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
+                             'owned-table-1', 'modelx_helpers.immutable_inputs.Record')
+    __slots__ = ('_items', '_index', '_native_groups', '_metadata', '_preserve_scalar_types')
+
+    def __init__(self, values, *, preserve_scalar_types=False):
+        items = tuple((key, value if preserve_scalar_types else freeze(value))
+                      for key, value in values.items())
+        object.__setattr__(self, '_items', items)
+        object.__setattr__(self, '_index', MappingProxyType(dict(items)))
+        object.__setattr__(self, '_native_groups', {})
+        object.__setattr__(self, '_metadata', None)
+        object.__setattr__(self, '_preserve_scalar_types', bool(preserve_scalar_types))
+
+    def __setattr__(self, name, value):
+        raise AttributeError('immutable input')
+
+    def __delattr__(self, name):
+        raise AttributeError('immutable input')
+
+    def __getitem__(self, key):
+        return self._index[key]
+
+    def lookup_enum(self, key, enum_type, *, default=_MISSING):
+        """Resolve a stored label to its enum member with an optional default."""
+        try:
+            return enum_type[self[key]]
+        except (KeyError, TypeError):
+            if default is _MISSING:
+                raise
+            return default
+
+    def slice(self, key, *keys):
+        """Follow group keys, optionally ending at a prepared row."""
+        value = self[key]
+        return value.slice(*keys) if keys else value
+
+    def __iter__(self):
+        return iter(self._index)
+
+    def __len__(self):
+        return len(self._index)
+
+    def __reduce__(self):
+        if getattr(self, '_preserve_scalar_types', False):
+            return _restore_record, (type(self), dict(self._items), self._metadata, True)
+        if self._metadata is None:
+            return type(self), (dict(self._items),)
+        return _restore_record, (type(self), dict(self._items), self._metadata)
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+class _TableIndex:
+    """Read-only view of the table's complete row keys in input order."""
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __contains__(self, key):
+        return self._table.contains(key)
+
+    def __iter__(self):
+        return iter(self._table._keys)
+
+    def __len__(self):
+        return len(self._table._keys)
+
+    def max_int(self) -> int:
+        return int(max(self._table._keys))
+
+    def max_float(self) -> float:
+        return float(max(self._table._keys))
+
+
+class Table(Mapping):
+    __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
+                             'owned-table-1', 'modelx_helpers.immutable_inputs.Table')
+    __slots__ = ('_keys', '_values', '_columns', '_positions', '_ordered', '_native_cache', '_index_error', '_metadata', '_preserve_scalar_types')
+
+    def __init__(self, keys, values, columns, index_error=None, *, preserve_scalar_types=False):
+        keys, columns = tuple(keys), tuple(columns)
+        values = tuple(tuple(value if preserve_scalar_types else freeze(value)
+                             for value in row) for row in values)
+        if not columns or len(set(columns)) != len(columns):
+            raise ValueError('table columns must be nonempty and unique')
+        if any(type(column) is not str for column in columns):
+            raise TypeError('table columns must be strings')
+        if len(keys) != len(values) or any(len(row) != len(columns) for row in values):
+            raise ValueError('table dimensions do not match')
+        position_keys = keys if index_error is None else tuple(_index_key(key, index_error) for key in keys)
+        positions = dict(zip(position_keys, range(len(keys))))
+        if len(positions) != len(keys):
+            raise ValueError('duplicate table key')
+        object.__setattr__(self, '_keys', keys)
+        object.__setattr__(self, '_values', values)
+        object.__setattr__(self, '_columns', columns)
+        object.__setattr__(self, '_positions', MappingProxyType(positions))
+        try:
+            ordered = tuple(sorted(keys))
+        except TypeError:
+            ordered = None
+        object.__setattr__(self, '_ordered', ordered)
+        object.__setattr__(self, '_native_cache', {})
+        object.__setattr__(self, '_index_error', freeze(index_error))
+        object.__setattr__(self, '_metadata', None)
+        object.__setattr__(self, '_preserve_scalar_types', bool(preserve_scalar_types))
+
+    def __setattr__(self, name, value):
+        raise AttributeError('immutable input')
+
+    def __delattr__(self, name):
+        raise AttributeError('immutable input')
+
+    def __getitem__(self, key):
+        if key == 'keys':
+            return self._keys
+        if key == 'values':
+            return self._values
+        if key == 'columns':
+            return self._columns
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(('keys', 'values', 'columns'))
+
+    def __len__(self):
+        return 3
+
+    def lookup(self, key, column):
+        if (isinstance(column, str) and self._index_error is not None
+                and self._index_error._index.get('pandas_columns', False)):
+            name = column
+            try:
+                column = self._columns.index(name)
+            except ValueError:
+                raise KeyError(name) from None
+        if self._index_error is None:
+            position = self._positions[key]
+        else:
+            if not _valid_index_key(key, self._index_error):
+                raise KeyError(key)
+            try:
+                position = self._positions[_index_key(key, self._index_error)]
+            except KeyError:
+                raise KeyError(key) from None
+        column = self._columns.index(column) if isinstance(column, str) else column
+        return self._values[position][column]
+
+    def lookup_float(self, key, column, default=_MISSING) -> float:
+        """Read a table value using the typed float lookup contract."""
+        from .typed_inputs import lookup_float
+
+        return lookup_float(self, key, column, default)
+
+    def lookup_int(self, key, column, default=_MISSING) -> int:
+        """Read a table value using the typed integer lookup contract."""
+        from .typed_inputs import lookup_int
+
+        return lookup_int(self, key, column, default)
+
+    def interpolate_float(self, key, column) -> float:
+        """Interpolate adjacent integer rows and hold the final row above its key."""
+        from math import floor
+
+        lower = int(floor(key))
+        last = self.index.max_int()
+        if lower >= last:
+            return self.lookup_float(last, column)
+        start = self.lookup_float(lower, column)
+        end = self.lookup_float(lower + 1, column)
+        return start + (end - start) * (key - lower)
+
+    def slice(self, key) -> Record:
+        """Select a row with the pandas row metadata captured at preparation."""
+        from .table_operations import row
+
+        return row(self, key)
+
+    row = slice
+
+    def previous(self, key, column):
+        if self._ordered is None:
+            raise TypeError('predecessor lookup requires ordered keys')
+        index = bisect_right(self._ordered, key) - 1
+        if index < 0:
+            raise ValueError(f'No key at or before {key!r}')
+        return self.lookup(self._ordered[index], column)
+
+    def contains(self, key):
+        if self._index_error is None:
+            return key in self._positions
+        return (_valid_index_key(key, self._index_error)
+                and _index_key(key, self._index_error) in self._positions)
+
+    @property
+    def index(self):
+        """The table's complete row keys in their original order."""
+        return _TableIndex(self)
+
+    def __reduce__(self):
+        args = (self._keys, self._values, self._columns)
+        if self._index_error is not None:
+            args += (self._index_error,)
+        if getattr(self, '_preserve_scalar_types', False):
+            return _restore_table, (type(self), args, self._metadata, True)
+        if self._metadata is None:
+            return type(self), args
+        return _restore_table, (type(self), args, self._metadata)
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def _restore_record(cls, values, metadata, preserve_scalar_types=False):
+    result = cls(values, preserve_scalar_types=preserve_scalar_types) if preserve_scalar_types else cls(values)
+    object.__setattr__(result, '_metadata', metadata)
+    return result
+
+
+def _restore_table(cls, args, metadata, preserve_scalar_types=False):
+    result = cls(*args, preserve_scalar_types=preserve_scalar_types) if preserve_scalar_types else cls(*args)
+    object.__setattr__(result, '_metadata', metadata)
+    return result
+
+
+def freeze(value):
+    kind = type(value)
+    if kind is int or kind is float or kind is str or kind is bool or kind is bytes or value is None:
+        return value
+    if isinstance(value, (Record, Table)):
+        return value
+    if kind is dict:
+        if value.keys() == {'keys', 'values', 'columns'}:
+            return Table(value['keys'], value['values'], value['columns'])
+        return Record(value)
+    if kind is tuple or kind is list:
+        return tuple(freeze(item) for item in value)
+    if isinstance(value, (bool, int, float, str, bytes)):
+        return value
+    if kind.__module__.startswith('numpy'):
+        import numpy as np
+        if isinstance(value, (np.integer, np.floating, np.bool_)):
+            return value
+    # These pandas missing scalars are immutable, pickleable singletons. Keep
+    # their identity: replacing NA/NaT with NaN changes conversion exceptions.
+    if kind.__module__.startswith('pandas.'):
+        from pandas import NA, NaT
+        if value is NA or value is NaT:
+            return value
+    raise TypeError(f'unsupported immutable input value: {kind.__name__}')
+
+
+def _copy_container(value):
+    """Copy a pandas object cell's containers while retaining its scalar values."""
+    kind = type(value)
+    if kind is dict:
+        return {key: _copy_container(item) for key, item in value.items()}
+    if kind is list:
+        return [_copy_container(item) for item in value]
+    if kind is tuple:
+        return tuple(_copy_container(item) for item in value)
+    return value
+
+
+_INDEX_NAN = object()
+
+def _missing_index_part(value):
+    if value is None or isinstance(value, float) and value != value:
+        return True
+    if type(value).__module__.startswith('pandas.'):
+        from pandas import NA, NaT
+        return value is NA or value is NaT
+    return False
+
+
+def _index_key(key, spec):
+    if spec is None:
+        return key
+    if spec['multi'] and type(key) is tuple:
+        return tuple(_INDEX_NAN if _missing_index_part(part) else part for part in key)
+    if type(key) is float and key != key:
+        return _INDEX_NAN
+    return key
+
+
+def _valid_index_key(key, spec):
+    parts = key if spec['multi'] and type(key) is tuple else (key,)
+    if len(parts) != len(spec['boolean_modes']):
+        return False
+    # 0: mixed object labels; 1: boolean labels; 2: non-boolean labels.
+    for part, mode in zip(parts, spec['boolean_modes']):
+        if _missing_index_part(part):
+            continue
+        boolean = type(part) is bool
+        if not boolean and type(part).__module__.startswith('numpy'):
+            import numpy as np
+            boolean = type(part) is np.bool_
+        if mode == 1 and not boolean:
+            return False
+        if mode == 2 and boolean:
+            return False
+    return True
