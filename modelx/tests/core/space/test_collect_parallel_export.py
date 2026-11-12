@@ -13,10 +13,11 @@ def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ord
     from concurrent import futures
     from modelx.export import _mx_sys as runtime
     assert runtime._mx_collect_adapter_version == 2
-    monkeypatch.setattr(runtime, '_mx_parallel_workers', workers)
     monkeypatch.setattr(futures, 'as_completed', lambda tasks: (tasks[i] for i in (2, 0, 1, 3)))
     values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
     base = SimpleNamespace(_model=SimpleNamespace())
+    runtime.BaseModel._mx_collect_init_v2(base._model)
+    runtime.BaseModel._mx_collect_set_workers_v2(base._model, workers)
     failure = LookupError('retry')
     failing = True
     def evaluate(coords):
@@ -33,7 +34,7 @@ def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ord
     with pytest.raises(LookupError) as error:
         collect()
     assert error.value is failure and not cache
-    assert not getattr(runtime._mx_collect_context, 'active', False)
+    assert not getattr(base._model._mx_collect_dispatch_state, 'active', False)
     failing = False
     result = collect()
     assert result.sum.value == expected

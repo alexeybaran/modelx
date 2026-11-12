@@ -211,13 +211,11 @@ def _mx_collect_check_shape(expected, value, path):
         _mx_collect_check_shape(expected[name], item, path + (name,))
 
 
-_mx_parallel_workers = 1
 _mx_collect_adapter_version = 2
-_mx_collect_context = threading.local()
 
 
 def _mx_collect_state(base):
-    return getattr(base._model, '_mx_collect_dispatch_state', None) or _mx_collect_context
+    return base._model._mx_collect_dispatch_state
 
 
 def _mx_collect_native_coords(coords):
@@ -245,7 +243,7 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
                 return found
 
     context = _mx_collect_state(base)
-    workers = _mx_parallel_workers if context is _mx_collect_context else 1
+    workers = 1
     options = getattr(base, '_mx_collect_options_v2', None)
     if options is not None:
         workers, evaluate_serial, reuse_in_parallel, private_ordered = options()
@@ -288,11 +286,10 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
     return result if cache is None else cache.setdefault(key, result)
 
 
-def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, private_ordered=False,
-                         workers=None):
+def _mx_collect_parallel(base, coords, loop_name, names, args, private, private_ordered, workers):
     from concurrent.futures import ThreadPoolExecutor
 
-    workers = min(_mx_parallel_workers if workers is None else workers, len(coords))
+    workers = min(workers, len(coords))
     if private is None:
         return _mx_collect_ordered(base, coords, loop_name, names, args, workers)
     chunks = [coords[i * len(coords) // workers:(i + 1) * len(coords) // workers]
