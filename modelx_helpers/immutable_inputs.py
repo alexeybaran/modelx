@@ -304,7 +304,11 @@ class Table(Mapping):
         frame = self._native_cache.get('pandas_frame')
         if frame is None:
             from .table_operations import to_pandas
-            frame = self._native_cache.setdefault('pandas_frame', to_pandas(self))
+            try:
+                frame = to_pandas(self)
+            except (TypeError, ValueError) as exc:   # hasattr() and getattr(..., default) expect AttributeError
+                raise AttributeError(name) from exc
+            frame = self._native_cache.setdefault('pandas_frame', frame)
         return getattr(frame.copy(deep=False), name)
 
     def __reduce__(self):
