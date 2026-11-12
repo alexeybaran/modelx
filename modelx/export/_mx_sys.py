@@ -50,6 +50,11 @@ class BaseModel(BaseParent):
 
     path = pathlib.Path(__file__).parent
 
+    def _mx_collect_set_workers_v2(self, workers):
+        if type(workers) is not int or workers < 1:
+            raise ValueError('collect workers must be a positive integer')
+        self._mx_collect_workers_override = workers
+
     def _mx_load_io(self):
 
         ios = {}
@@ -189,7 +194,7 @@ def _mx_collect_check_shape(expected, value, path):
 
 
 _mx_parallel_workers = 1
-_mx_collect_adapter_version = 1
+_mx_collect_adapter_version = 2
 _mx_collect_context = threading.local()
 
 
@@ -222,7 +227,15 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
             if found is not None:
                 return found
 
-    if (evaluate_serial is not None and _mx_parallel_workers == 1
+    workers = _mx_parallel_workers
+    options = getattr(base, '_mx_collect_options_v2', None)
+    if options is not None:
+        workers, evaluate_serial, reuse_in_parallel, private_ordered = options()
+    override = getattr(base._model, '_mx_collect_workers_override', None)
+    if override is not None:
+        workers = override
+
+    if (evaluate_serial is not None and workers == 1
             and not getattr(_mx_collect_context, 'active', False)
             and sys.gettrace() is None and sys.getprofile() is None):
         _mx_collect_context.active = True
@@ -236,7 +249,7 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
         can_parallel = getattr(base._model, '_mx_collect_parallel_allowed', None)
         # A shared Cell may call collect while holding the model lock. Keep
         # that nested calculation on the owning thread to avoid a lock wait cycle.
-        if (_mx_parallel_workers > 1 and len(coords) > 1
+        if (workers > 1 and len(coords) > 1
                 and not getattr(_mx_collect_context, 'active', False)
                 and (can_parallel is None or can_parallel())):
             private = None
@@ -244,7 +257,7 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
                     and sys.gettrace() is None and sys.getprofile() is None
                     and _mx_collect_native_coords(coords)):
                 private = evaluate_serial
-            result = _mx_collect_parallel(base, coords, loop_name, names, args, private, private_ordered)
+            result = _mx_collect_parallel(base, coords, loop_name, names, args, private, private_ordered, workers)
         else:
             result = _mx_collect_evaluate(base, coords, loop_name, names, args)
     else:
@@ -252,10 +265,11 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
     return result if cache is None else cache.setdefault(key, result)
 
 
-def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, private_ordered=False):
+def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, private_ordered=False,
+                         workers=None):
     from concurrent.futures import ThreadPoolExecutor
 
-    workers = min(_mx_parallel_workers, len(coords))
+    workers = min(_mx_parallel_workers if workers is None else workers, len(coords))
     chunks = [coords[i * len(coords) // workers:(i + 1) * len(coords) // workers]
               for i in range(workers)]
     result = None

@@ -1019,8 +1019,10 @@ class SpaceTranslator(ParentTranslator):
                         and getattr(domain.source, 'parent', None) is space._impl
                         and domain.source.name in space._impl.cells):
                     domain_expr = "self.%s()" % domain.source.name
+                    domain_ref = (domain.source.name, True)
                 elif domain.ref_parent is space._impl:
                     domain_expr = "self.%s" % domain.ref_name
+                    domain_ref = (domain.ref_name, False)
                 else:
                     raise ValueError(
                         "export collect domain must be a Cell or Reference "
@@ -1042,12 +1044,16 @@ class SpaceTranslator(ParentTranslator):
                         or 'collect' in inherited_params):
                     collect_method = '_mx_collect'
                 itemspace_methods += textwrap.dedent("""\
+                def _mx_collect_contract_v2(self):
+                    return {contract!r}
+
                 def {method}(self{comma}{signature}):
                     return _mx_sys.collect_from_space(
                         self, {domain}, {parameter!r}, ({names}), ({args}),
                         cache=self._mx_collect_cache)
 
                 """).format(domain=domain_expr, parameter=loop_name,
+                            contract=(loop_name, tuple(param.name for param in collect_params), *domain_ref),
                             method=collect_method,
                             comma=', ' if collect_signature else '',
                             signature=collect_signature, args=collect_args,
