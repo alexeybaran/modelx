@@ -91,6 +91,8 @@ def _axis(spec):
         return pd.Index(spec[1], name=spec[2], dtype=spec[3], tupleize_cols=False)
     if type(spec) is tuple and spec[0] == 'range':
         return pd.RangeIndex(spec[1], spec[2], spec[3], name=spec[4])
+    if type(spec) is tuple and spec[0] == 'subset':
+        return spec[1].take(list(spec[2])).droplevel(list(spec[3])).copy(deep=True)
     return spec.copy(deep=True)
 
 

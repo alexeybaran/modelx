@@ -131,11 +131,13 @@ def test_grouped_table_restores_interleaved_rows_and_index_levels(report, empty)
     frame = pd.DataFrame({'rate': [0.2, 0.3, np.nan, 0.1]}, index=index)
     if empty:
         frame = frame.iloc[:0]
+    original = frame.copy(deep=True)
     grouped = inputs.table(frame, groups=('smoker', 'sex'), report=report)
+    frame.index.names = ['x', 'y', 'z']
     for value in [grouped, pickle.loads(pickle.dumps(grouped))]:
-        pd.testing.assert_frame_equal(to_pandas(value), frame, check_exact=True)
+        pd.testing.assert_frame_equal(to_pandas(value), original, check_exact=True)
         if not empty:
-            expected = frame.xs('N', level='smoker')
+            expected = original.xs('N', level='smoker')
             pd.testing.assert_frame_equal(to_pandas(value['N']), expected, check_exact=True)
             pd.testing.assert_frame_equal(to_pandas(value['N']['M']), expected.loc['M'],
                                           check_exact=True)

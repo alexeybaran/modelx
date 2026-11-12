@@ -141,26 +141,29 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
 
     def build(branch, depth):
         if depth == len(groups):
-            positions = [entry[2] for entry in branch] if groups else None
+            positions = tuple(entry[2] for entry in branch) if groups else None
             leaf_spec = index_error
-            if groups:
-                leaf_index = axes[1].take(positions).droplevel(grouped_positions)
+            if groups and (rows or report):
                 # Reconstruction axes are separate from scalar selection.
                 # Plain grouped leaves use ordinary Table keys.
-                if rows or report:
-                    leaf_spec = _pandas_index_spec(leaf_index)
+                leaf_index = axes[1].take(list(positions)).droplevel(grouped_positions)
+                leaf_spec = _pandas_index_spec(leaf_index)
             result = Table([entry[0] for entry in branch],
                            [entry[1] for entry in branch], selected, leaf_spec,
                            preserve_scalar_types=preserve_scalar_types)
             if rows or report:
                 leaf = selected_frame
                 if groups:
-                    leaf = selected_frame.iloc[positions].copy(deep=False)
+                    leaf = selected_frame.iloc[list(positions)].copy(deep=False)
                     leaf.index = leaf_index
                 metadata = _report_metadata(leaf, rows=rows,
                                             preserve_scalar_types=preserve_scalar_types)
             else:
-                metadata = ('axes', leaf_index, *axes[2:]) if groups else _axes_metadata(selected_frame, dtypes)
+                if groups:
+                    index = ('subset', axes[1], positions, tuple(grouped_positions))
+                    metadata = ('axes', index, *axes[2:])
+                else:
+                    metadata = _axes_metadata(selected_frame, dtypes)
             if original_objects:
                 containers = ({i: original_objects[pos] for i, pos in enumerate(positions)
                                if pos in original_objects} if groups else original_objects)
@@ -180,7 +183,8 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         order = tuple(sorted(range(len(positions)), key=positions.__getitem__))
         index = axes[1]
         if depth:
-            index = index.take([positions[i] for i in order]).droplevel(grouped_positions[:depth])
+            index = ('subset', index, tuple(positions[i] for i in order),
+                     tuple(grouped_positions[:depth]))
         object.__setattr__(result, '_metadata', ('grouped', index, *axes[2:], order))
         return result, positions
 
