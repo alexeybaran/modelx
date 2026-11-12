@@ -280,8 +280,9 @@ def new_space(name=None, bases=None, formula=None, refs=None, *, collect_over=No
             dynamic space instances. If provided, the space becomes parameterized.
         refs (dict, optional): References to define in the created space.
         collect_over (mapping, optional): The one Space parameter and its
-            domain iterated by :meth:`Space.collect`. Other Space parameters remain
-            ordinary arguments to ``collect()``.
+            domain iterated by ``collect()``. Other Space parameters remain
+            ordinary arguments to ``collect()``. If a model member is named
+            ``collect``, call ``_mx_collect()`` to aggregate the outputs.
         collect_outputs (callable or str, optional): Zero-argument per-ItemSpace
             formula returning optional 'individual' and 'sum' output sections.
 

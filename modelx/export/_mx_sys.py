@@ -4,7 +4,6 @@ import threading
 import pickle
 from importlib import import_module
 import pathlib
-from copy import deepcopy
 from collections import OrderedDict
 from typing import Dict
 try:
@@ -17,6 +16,34 @@ except ImportError:
 class BaseMxObject:
 
     __slots__ = ()
+
+
+class _CollectLock:
+    """Model lock with an ownership query using public lock operations."""
+
+    __slots__ = ('_lock', '_owner')
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._owner = threading.local()
+
+    def __enter__(self):
+        depth = getattr(self._owner, 'depth', 0)
+        self._lock.acquire()
+        try:
+            self._owner.depth = depth + 1
+        except BaseException:
+            self._lock.release()
+            raise
+
+    def __exit__(self, *exc):
+        try:
+            self._owner.depth -= 1
+        finally:
+            self._lock.release()
+
+    def held_by_current_thread(self):
+        return getattr(self._owner, 'depth', 0) != 0
 
 
 class BaseParent(BaseMxObject):
@@ -49,6 +76,14 @@ class BaseParent(BaseMxObject):
 class BaseModel(BaseParent):
 
     path = pathlib.Path(__file__).parent
+
+    def _mx_collect_init_v2(self):
+        self._mx_collect_dispatch_state = threading.local()
+
+    def _mx_collect_set_workers_v2(self, workers):
+        if type(workers) is not int or workers < 1:
+            raise ValueError('collect workers must be a positive integer')
+        self._mx_collect_workers_override = workers
 
     def _mx_load_io(self):
 
@@ -140,18 +175,6 @@ class CollectResult:
         return 'CollectResult(%s)' % ', '.join(self._fields)
 
 
-def _mx_collect_detach(value):
-    if type(value) in (float, int, bool, str, bytes, complex, type(None)):
-        return value
-    if isinstance(value, BaseSpace):
-        raise TypeError('collect output cannot retain a live Space')
-    if type(value) is dict:
-        return {k: _mx_collect_detach(v) for k, v in value.items()}
-    if type(value) in (list, tuple):
-        return type(value)(_mx_collect_detach(v) for v in value)
-    return deepcopy(value)
-
-
 def _mx_collect_sum(old, new, path):
     if type(new) is dict:
         if old is None:
@@ -189,8 +212,12 @@ def _mx_collect_check_shape(expected, value, path):
 
 
 _mx_parallel_workers = 1
-_mx_collect_adapter_version = 1
+_mx_collect_adapter_version = 2
 _mx_collect_context = threading.local()
+
+
+def _mx_collect_state(base):
+    return getattr(base._model, '_mx_collect_dispatch_state', None) or _mx_collect_context
 
 
 def _mx_collect_native_coords(coords):
@@ -203,14 +230,9 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
 
     if len(names) != len(args) or loop_name in names:
         raise ValueError('invalid collect arguments')
-    if isinstance(domain, (str, bytes, set, frozenset)) or iter(domain) is domain:
-        raise TypeError('collect domain must be finite, ordered and re-iterable')
-    coords = tuple(domain)
-    if not coords:
-        raise ValueError('collect domain must not be empty')
-    if len(set(coords)) != len(coords):
-        raise ValueError('collect domain contains duplicate coordinates')
+    from ._mx_collect_semantics import normalize_domain
 
+    coords = normalize_domain(domain)
     key = (coords, args)
     if cache is not None:
         try:
@@ -222,40 +244,57 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
             if found is not None:
                 return found
 
-    if (evaluate_serial is not None and _mx_parallel_workers == 1
-            and not getattr(_mx_collect_context, 'active', False)
+    context = _mx_collect_state(base)
+    workers = _mx_parallel_workers if context is _mx_collect_context else 1
+    options = getattr(base, '_mx_collect_options_v2', None)
+    if options is not None:
+        workers, evaluate_serial, reuse_in_parallel, private_ordered = options()
+    override = getattr(base._model, '_mx_collect_workers_override', None)
+    if override is not None:
+        workers = override
+
+    if (evaluate_serial is not None and workers == 1
+            and not getattr(context, 'active', False)
             and sys.gettrace() is None and sys.getprofile() is None):
-        _mx_collect_context.active = True
+        context.active = True
         try:
             result = evaluate_serial(coords)
         finally:
-            _mx_collect_context.active = False
+            context.active = False
         if result is not None:
             return result if cache is None else cache.setdefault(key, result)
     if evaluate is None:
         can_parallel = getattr(base._model, '_mx_collect_parallel_allowed', None)
         # A shared Cell may call collect while holding the model lock. Keep
         # that nested calculation on the owning thread to avoid a lock wait cycle.
-        if (_mx_parallel_workers > 1 and len(coords) > 1
-                and not getattr(_mx_collect_context, 'active', False)
+        if (workers > 1 and len(coords) > 1
+                and not getattr(context, 'active', False)
                 and (can_parallel is None or can_parallel())):
             private = None
             if (reuse_in_parallel and evaluate_serial is not None
                     and sys.gettrace() is None and sys.getprofile() is None
                     and _mx_collect_native_coords(coords)):
                 private = evaluate_serial
-            result = _mx_collect_parallel(base, coords, loop_name, names, args, private, private_ordered)
+            result = _mx_collect_parallel(base, coords, loop_name, names, args, private, private_ordered, workers)
         else:
-            result = _mx_collect_evaluate(base, coords, loop_name, names, args)
+            active = getattr(context, 'active', False)
+            context.active = True
+            try:
+                result = _mx_collect_evaluate(base, coords, loop_name, names, args)
+            finally:
+                context.active = active
     else:
         result = evaluate()
     return result if cache is None else cache.setdefault(key, result)
 
 
-def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, private_ordered=False):
+def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, private_ordered=False,
+                         workers=None):
     from concurrent.futures import ThreadPoolExecutor
 
-    workers = min(_mx_parallel_workers, len(coords))
+    workers = min(_mx_parallel_workers if workers is None else workers, len(coords))
+    if private is None:
+        return _mx_collect_ordered(base, coords, loop_name, names, args, workers)
     chunks = [coords[i * len(coords) // workers:(i + 1) * len(coords) // workers]
               for i in range(workers)]
     result = None
@@ -295,7 +334,9 @@ def _mx_collect_parallel(base, coords, loop_name, names, args, private=None, pri
 
 
 def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
-    _mx_collect_context.active = True
+    context = _mx_collect_state(base)
+    active = getattr(context, 'active', False)
+    context.active = True
     try:
         if private is not None:
             result = private(coords)
@@ -303,80 +344,109 @@ def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
                 return result
         return _mx_collect_evaluate(base, coords, loop_name, names, args)
     finally:
-        _mx_collect_context.active = False
+        context.active = active
+
+
+def _mx_collect_batch(base, coords, loop_name, names, args):
+    events = []
+    context = _mx_collect_state(base)
+    active = getattr(context, 'active', False)
+    context.active = True
+    try:
+        events.extend(_mx_collect_policy_outputs(base, coords, loop_name, names, args))
+    except BaseException as error:
+        return events, error
+    finally:
+        context.active = active
+    return events, None
+
+
+def _mx_collect_ordered(base, coords, loop_name, names, args, workers):
+    from concurrent.futures import ThreadPoolExecutor
+    from itertools import islice
+    from ._mx_collect_semantics import Accumulator
+
+    # Bound unmerged output by keeping at most one small batch per worker.
+    size = max(1, min(8, len(coords) // workers))
+    starts = iter(range(0, len(coords), size))
+    accumulator = Accumulator(CollectResult)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        def submit(start):
+            return executor.submit(_mx_collect_batch, base, coords[start:start + size],
+                                   loop_name, names, args)
+
+        pending = collections.deque(submit(start) for start in islice(starts, workers))
+        while pending:
+            events, error = pending.popleft().result()
+            for coordinate, outputs in events:
+                accumulator.add(coordinate, outputs)
+            if error is not None:
+                raise error
+            start = next(starts, None)
+            if start is not None:
+                pending.append(submit(start))
+    return accumulator.result()
 
 
 def _mx_collect_evaluate(base, coords, loop_name, names, args):
-    result = None
-    modes = None
-    individual_shape = None
-    scratch = {}
-    for coordinate in coords:
-        values = dict(zip(names, args))
-        values[loop_name] = coordinate
-        root = base.__class__(base)
-        releases = []
-        complete = False
-        try:
-            spaces = list(zip(root._mx_walk(), base._mx_walk()))
-            for space, template in spaces:
-                space._mx_copy_refs(template, base)
-                for previous_root in base._mx_roots:
-                    previous_root._mx_copy_params(space)
-                base._mx_assign_params(space, **values)
-                space._mx_roots.extend(base._mx_roots)
-                space._mx_roots.append(root)
-            apply_formula = getattr(root, '_mx_apply_formula', None)
-            if apply_formula is not None:
-                apply_formula(**values)
-            for space, template in spaces:
-                release = getattr(space, '_mx_collect_release', None)
-                if release is not None:
-                    releases.append((release, template))
-                attach = getattr(space, '_mx_collect_attach', None)
-                if attach is not None:
-                    attach(scratch, template)
-            outputs = root.collect_outputs()
-            if type(outputs) is not dict or not outputs or set(outputs) - {'individual', 'sum'}:
-                raise ValueError('collect_outputs must declare individual and/or sum')
-            if modes is None:
-                modes = tuple(outputs)
-                result = {mode: None for mode in modes}
-            elif tuple(outputs) != modes:
-                raise ValueError('collect_outputs modes changed between policies')
-            for mode, items in outputs.items():
-                if type(items) is not dict or not items or any(type(name) is not str for name in items):
-                    raise TypeError('collect_outputs sections need named values')
-                items = _mx_collect_detach(items)
-                if mode == 'individual':
-                    shape = {name: _mx_collect_shape(item)
-                             for name, item in items.items()}
-                    if individual_shape is None:
-                        individual_shape = shape
-                        result[mode] = OrderedDict()
-                    else:
-                        _mx_collect_check_shape(individual_shape, items, (mode,))
-                    result[mode][coordinate] = CollectResult(items)
-                else:
-                    result[mode] = _mx_collect_sum(result[mode], items, (mode,))
-            complete = True
-        finally:
-            cleanup_error = None
-            for release, template in releases:
-                try:
-                    release(scratch, template)
-                except BaseException as error:
-                    if cleanup_error is None:
-                        cleanup_error = error
-            if not complete or cleanup_error is not None:
-                scratch.clear()
-            if complete and cleanup_error is not None:
-                raise cleanup_error
-        del root
+    from contextlib import closing
+    from ._mx_collect_semantics import Accumulator
 
-    return CollectResult({
-        mode: value if mode == 'individual' else CollectResult(value)
-        for mode, value in result.items()})
+    accumulator = Accumulator(CollectResult)
+    with closing(_mx_collect_policy_outputs(base, coords, loop_name, names, args)) as events:
+        for coordinate, outputs in events:
+            accumulator.add(coordinate, outputs)
+    return accumulator.result()
+
+
+def _mx_collect_policy_outputs(base, coords, loop_name, names, args):
+    from ._mx_collect_semantics import prepare_output
+
+    scratch = {}
+    try:
+        for coordinate in coords:
+            values = dict(zip(names, args))
+            values[loop_name] = coordinate
+            root = base.__class__(base)
+            releases = []
+            complete = False
+            try:
+                spaces = list(zip(root._mx_walk(), base._mx_walk()))
+                for space, template in spaces:
+                    space._mx_copy_refs(template, base)
+                    for previous_root in base._mx_roots:
+                        previous_root._mx_copy_params(space)
+                    base._mx_assign_params(space, **values)
+                    space._mx_roots.extend(base._mx_roots)
+                    space._mx_roots.append(root)
+                apply_formula = getattr(root, '_mx_apply_formula', None)
+                if apply_formula is not None:
+                    apply_formula(**values)
+                for space, template in spaces:
+                    release = getattr(space, '_mx_collect_release', None)
+                    if release is not None:
+                        releases.append((release, template))
+                    attach = getattr(space, '_mx_collect_attach', None)
+                    if attach is not None:
+                        attach(scratch, template)
+                outputs = prepare_output(root.collect_outputs(), (BaseMxObject,))
+                complete = True
+            finally:
+                cleanup_error = None
+                for release, template in releases:
+                    try:
+                        release(scratch, template)
+                    except BaseException as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+                if not complete or cleanup_error is not None:
+                    scratch.clear()
+                if complete and cleanup_error is not None:
+                    raise cleanup_error
+            del root
+            yield coordinate, outputs
+    finally:
+        scratch.clear()
 
 
 class MiniBaseSharedIO:

@@ -8,8 +8,7 @@ accumulated immediately. The ItemSpace is released after its outputs are detache
 """
 
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sized
-from copy import deepcopy
+from collections.abc import Mapping
 from inspect import BoundArguments, Signature, Parameter
 from itertools import product
 
@@ -20,6 +19,7 @@ from modelx.core.dynamic import ItemSpaceImpl
 from modelx.core.formula import Formula
 from modelx.core.reference import ReferenceImpl, ReferenceProxy
 from modelx.core.node import NodeFactory, BaseNodeFactoryImpl
+from modelx.export._mx_collect_semantics import Accumulator, normalize_domain, prepare_output
 
 
 class _IdentityArgument:
@@ -159,23 +159,7 @@ class _CollectDomain:
             else:
                 value = source
 
-        if (
-            not isinstance(value, Sized)
-            or not isinstance(value, Iterable)
-            or isinstance(value, (str, bytes, set, frozenset))
-            or iter(value) is value
-        ):
-            raise TypeError("collect_over domain must be finite, ordered and re-iterable")
-
-        domain = tuple(value)
-        if not domain:
-            raise ValueError("collect_over domain must not be empty")
-        try:
-            if len(set(domain)) != len(domain):
-                raise ValueError("collect_over domain contains duplicate coordinates")
-        except TypeError as exc:
-            raise TypeError("collect_over coordinates must be hashable") from exc
-        return domain
+        return normalize_domain(value)
 
 
 def resolve_collect_over(space, collect_over):
@@ -236,12 +220,6 @@ class _TransientItemSpaceImpl(ItemSpaceImpl):
             for key in list(self.parent.dynamic_cache):
                 if key[:len(prefix)] == prefix:
                     self.parent.dynamic_cache.pop(key, None)
-
-
-def _detach(value):
-    if isinstance(value, (Interface, Impl, BaseNamespace, ReferenceProxy)):
-        raise TypeError("collect_outputs must return data, not live modelx objects")
-    return deepcopy(value)
 
 
 class _CollectNodeView(NodeFactory):
@@ -467,165 +445,23 @@ class CollectRunner(BaseNodeFactoryImpl):
         for ref in external_refs:
             refgraph.add_edge(ref, caller)
 
-    @staticmethod
-    def _check_output(value, mode_keys):
-        """Validate and detach the two optional collection modes.
-
-        ``collect_outputs`` must return a plain dict containing one or both of
-        ``individual`` and ``sum``. Each mode contains named outputs; nested
-        dictionaries below those names are ordinary output structure.
-        """
-
-        if type(value) is not dict:
-            raise TypeError(
-                "collect_outputs must return a plain dict with "
-                "'individual' and/or 'sum' sections")
-
-        allowed = {"individual", "sum"}
-        unexpected = set(value) - allowed
-        if unexpected:
-            raise ValueError(
-                "collect_outputs contains unsupported top-level section(s): "
-                + ", ".join(sorted(map(str, unexpected))))
-        if not value:
-            raise ValueError(
-                "collect_outputs must declare at least one of 'individual' or 'sum'")
-
-        checked = {}
-        for mode, outputs in value.items():
-            if type(outputs) is not dict or any(
-                    not isinstance(name, str) for name in outputs):
-                raise TypeError(
-                    f"collect_outputs[{mode!r}] must be a plain dict "
-                    "with string output names")
-            if not outputs:
-                raise ValueError(f"collect_outputs[{mode!r}] must not be empty")
-            checked[mode] = {name: _detach(item) for name, item in outputs.items()}
-
-        current_keys = tuple(checked)
-        if mode_keys is not None and current_keys != mode_keys:
-            raise ValueError(
-                "collect_outputs modes changed between loop iterations")
-        return checked, current_keys
-
-    @staticmethod
-    def _shape(value):
-        """Return the nested-dict shape of one individual output value."""
-
-        if type(value) is dict:
-            return {name: CollectRunner._shape(item) for name, item in value.items()}
-        return None
-
-    @staticmethod
-    def _check_shape(expected, value, path):
-        """Require a stable nested-dict shape across individual ItemSpaces."""
-
-        if expected is None:
-            if type(value) is dict:
-                raise ValueError(
-                    "collect_outputs structure changed between loop iterations "
-                    f"at {path}")
-            return
-
-        if type(value) is not dict or tuple(value) != tuple(expected):
-            raise ValueError(
-                "collect_outputs structure changed between loop iterations "
-                f"at {path}")
-        for name, item in value.items():
-            CollectRunner._check_shape(expected[name], item, path + (name,))
-
-    @staticmethod
-    def _collect_sum(collected, value, path):
-        """Preserve dictionary structure and add each leaf across ItemSpaces."""
-
-        if type(value) is dict:
-            if collected is None:
-                collected = {name: None for name in value}
-            elif type(collected) is not dict or tuple(collected) != tuple(value):
-                raise ValueError(
-                    "collect_outputs structure changed between loop iterations "
-                    f"at {path}")
-            for name, item in value.items():
-                collected[name] = CollectRunner._collect_sum(
-                    collected[name], item, path + (name,))
-            return collected
-
-        if collected is None:
-            return value
-        if type(collected) is dict:
-            raise ValueError(
-                "collect_outputs structure changed between loop iterations "
-                f"at {path}")
-        try:
-            return collected + value
-        except Exception as exc:
-            raise TypeError(
-                "collect_outputs 'sum' leaf does not support addition "
-                f"at {path}") from exc
-
-    @staticmethod
-    def _mode_result(outputs):
-        return CollectResult(outputs)
-
     def on_eval_formula(self, key):
         bound = self._bound(key)
         caller = (self, key)
         domains = self._domains()
-        result = None
-        mode_keys = None
-        individual_schema = None
+        accumulator = Accumulator(CollectResult)
+        live_types = (Interface, Impl, BaseNamespace, ReferenceProxy)
 
         for coords in product(*(domain for _, domain in domains)):
             coordinates = dict(zip((name for name, _ in domains), coords))
             root = self._new_frame(self._full_key(bound, coordinates))
             try:
-                value = root.cells["collect_outputs"].interface()
-                value, mode_keys = self._check_output(value, mode_keys)
-                if result is None:
-                    result = {mode: None for mode in mode_keys}
-
-                for mode, outputs in value.items():
-                    if mode == "individual":
-                        if individual_schema is None:
-                            individual_schema = {
-                                name: self._shape(item)
-                                for name, item in outputs.items()
-                            }
-                        elif tuple(individual_schema) != tuple(outputs):
-                            raise ValueError(
-                                "collect_outputs output names changed between loop "
-                                "iterations in 'individual'")
-                        else:
-                            for name, item in outputs.items():
-                                self._check_shape(
-                                    individual_schema[name], item,
-                                    ("individual", name))
-
-                        if result[mode] is None:
-                            result[mode] = OrderedDict()
-                        result[mode][coords[0]] = CollectResult(outputs)
-                    else:
-                        if result[mode] is None:
-                            result[mode] = {name: None for name in outputs}
-                        elif tuple(result[mode]) != tuple(outputs):
-                            raise ValueError(
-                                "collect_outputs output names changed between loop "
-                                "iterations in 'sum'")
-                        for name, item in outputs.items():
-                            result[mode][name] = self._collect_sum(
-                                result[mode][name], item, (mode, name))
-
+                outputs = root.cells["collect_outputs"].interface()
+                accumulator.add(coords[0], prepare_output(outputs, live_types))
                 self._contract_dependencies(root, caller)
             finally:
                 root.release()
 
-        # Domains are validated as non-empty.
-        result = CollectResult({
-            mode: (
-                outputs if mode == "individual"
-                else self._mode_result(outputs)
-            )
-            for mode, outputs in result.items()
-        })
+        result = accumulator.result()
         self.data[key] = result
         return result
