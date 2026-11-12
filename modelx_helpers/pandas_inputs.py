@@ -87,7 +87,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         raise ValueError('indexing must be loc or at')
     if indexing == 'at' and groups:
         raise ValueError('at preparation requires complete keys')
-    index_error = _at_index_spec(frame.index, encoded_errors=indexing == 'at') if not groups else None
+    index_error = _pandas_index_spec(frame.index) if not groups else None
     selected = list(frame.columns) if columns is None else list(columns)
     if not selected or any(type(name) is not str for name in selected):
         raise ValueError('table columns must be nonempty strings')
@@ -147,7 +147,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                 # Reconstruction axes are separate from scalar selection.
                 # Plain grouped leaves use ordinary Table keys.
                 leaf_index = axes[1].take(list(positions)).droplevel(grouped_positions)
-                leaf_spec = _at_index_spec(leaf_index, encoded_errors=False)
+                leaf_spec = _pandas_index_spec(leaf_index)
             result = Table([entry[0] for entry in branch],
                            [entry[1] for entry in branch], selected, leaf_spec,
                            preserve_scalar_types=preserve_scalar_types)
@@ -286,12 +286,12 @@ def index(labels):
         return result
     return Table(keys,
                  tuple((position,) for position in range(len(labels))),
-                 ('position',), _at_index_spec(labels, encoded_errors=False))
+                 ('position',), _pandas_index_spec(labels))
 
 
 
-def _at_index_spec(index, *, encoded_errors=True):
-    """Own only the metadata required for full-scalar pandas .at semantics."""
+def _pandas_index_spec(index):
+    """Capture the label domains used by pandas scalar selection."""
     multi = isinstance(index, pd.MultiIndex)
     levels = index.levels if multi else (index,)
     modes = []
@@ -303,20 +303,10 @@ def _at_index_spec(index, *, encoded_errors=True):
             modes.append(0)
         else:
             modes.append(2)
-    # Calibrate the installed pandas encoding at preparation, not in lookup.
-    probe = pd.MultiIndex.from_tuples([('a', 0)])
-    bias = int(probe._engine.values[0]) >> int(probe._engine.offsets[0])
-    owned_levels = tuple(tuple(_key(value) for value in level) for level in levels)
-    # Build level ownership at this explicit preparation boundary. Native
-    # resource initialization must not call the Python Table constructor.
-    level_tables = tuple(Table(level, [(0.0,)] * len(level), ('position',))
-                         for level in owned_levels)
     return Record({
-        'multi': multi, 'encoded_errors': encoded_errors, 'pandas_columns': True,
+        'multi': multi, 'pandas_columns': True,
         'row_bool_labels': pd.api.types.is_bool_dtype(index.dtype),
-        'levels': owned_levels, 'level_tables': level_tables,
-        'offsets': tuple(map(int, index._engine.offsets)) if multi else (0,),
-        'boolean_modes': tuple(modes), 'bias': bias})
+        'boolean_modes': tuple(modes)})
 
 
 table.__modelx_native_operation__ = 'table'

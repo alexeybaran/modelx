@@ -155,12 +155,12 @@ class Table(Mapping):
         if self._index_error is None:
             position = self._positions[key]
         else:
+            if not _valid_index_key(key, self._index_error):
+                raise KeyError(key)
             try:
-                if not _valid_index_key(key, self._index_error):
-                    raise KeyError(key)
                 position = self._positions[_index_key(key, self._index_error)]
             except KeyError:
-                raise KeyError(_index_error_key(key, self._index_error)) from None
+                raise KeyError(key) from None
         column = self._columns.index(column) if isinstance(column, str) else column
         return self._values[position][column]
 
@@ -303,7 +303,7 @@ def _index_key(key, spec):
 
 def _valid_index_key(key, spec):
     parts = key if spec['multi'] and type(key) is tuple else (key,)
-    if len(parts) != len(spec['levels']):
+    if len(parts) != len(spec['boolean_modes']):
         return False
     # 0: mixed object labels; 1: boolean labels; 2: non-boolean labels.
     for part, mode in zip(parts, spec['boolean_modes']):
@@ -318,23 +318,3 @@ def _valid_index_key(key, spec):
         if mode == 2 and boolean:
             return False
     return True
-
-
-def _index_error_key(key, spec):
-    if not spec.get('encoded_errors', True):
-        return key
-    if not spec['multi'] or type(key) is not tuple or len(key) != len(spec['levels']):
-        return key
-    if not _valid_index_key(key, spec):
-        return key
-    result = 0
-    for part, level, offset in zip(key, spec['levels'], spec['offsets']):
-        if _missing_index_part(part):
-            code = spec['bias'] - 1
-        else:
-            try:
-                code = level.index(part) + spec['bias']
-            except ValueError:
-                return key
-        result |= code << offset
-    return result
