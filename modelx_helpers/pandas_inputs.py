@@ -306,7 +306,10 @@ def _pandas_index_spec(index):
     return Record({
         'multi': multi, 'pandas_columns': True,
         'row_bool_labels': pd.api.types.is_bool_dtype(index.dtype),
-        'boolean_modes': tuple(modes)})
+        'boolean_modes': tuple(modes),
+        # Older native providers read these fields at initialization, even
+        # when they return the original key instead of an encoded error key.
+        'encoded_errors': False, 'bias': 0, 'offsets': (), 'level_tables': ()})
 
 
 table.__modelx_native_operation__ = 'table'
