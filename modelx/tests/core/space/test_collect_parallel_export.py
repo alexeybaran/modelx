@@ -148,6 +148,7 @@ def test_generic_parallel_collect_adds_in_policy_order(tmp_path, monkeypatch, wo
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
         package = import_module(name)
+        assert name + '._mx_collect_semantics' in sys.modules
         package.mx_model._mx_collect_set_workers_v2(workers)
         result = package.mx_model.Policies.collect()
         assert result.sum.total == 1.0

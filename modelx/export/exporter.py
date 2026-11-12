@@ -424,7 +424,7 @@ class DataManager:
 class ParentTranslator:
 
     module_template = ''
-    threading_import = ''   # set by ModelTranslator when the model has a lock
+    model_imports = ''
     space_dict_template = textwrap.dedent("""\
     self._mx_spaces = {{
     {elements}
@@ -439,7 +439,7 @@ class ParentTranslator:
     def code(self):
         return self.module_template.format(
             dots=self.dots,
-            threading_import=self.threading_import,
+            model_imports=self.model_imports,
             MODEL_VAR=MODEL_VAR,
             SPACE_MODULE=SPACE_MODULE,
             child_imports=self.child_imports,
@@ -564,7 +564,7 @@ class ParentTranslator:
 class ModelTranslator(ParentTranslator):
     
     module_template = textwrap.dedent("""\
-    from . import _mx_sys{threading_import}
+    from . import _mx_sys{model_imports}
     from . import {SPACE_MODULE}
     
     {class_defs}
@@ -603,8 +603,10 @@ class ModelTranslator(ParentTranslator):
         super().__init__(parent, io_manager)
         self.use_lock = use_lock
         self.has_collect = has_collect
-        if use_lock and not has_collect:
-            self.threading_import = '\nimport threading'
+        if has_collect:
+            self.model_imports = '\nfrom . import _mx_collect_semantics'
+        elif use_lock:
+            self.model_imports = '\nimport threading'
 
     @cached_property
     def class_defs(self):
