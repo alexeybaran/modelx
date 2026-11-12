@@ -958,6 +958,7 @@ class SpaceTranslator(ParentTranslator):
 
         slot_names.extend(self.ref_names(space))    # ref_assigns / ref_copies
         slot_names.extend(dynamic_refs)
+        inherited_params = self.inherited_param_names(space)
 
         # ItemSpace
         if space.formula:
@@ -1035,17 +1036,23 @@ class SpaceTranslator(ParentTranslator):
                 if len(collect_params) == 1:
                     collect_args += ','
                     collect_names += ','
+                collect_method = 'collect'
+                if ('collect' in class_names
+                        or any(normalize(name) == 'collect' for name in slot_names)
+                        or 'collect' in inherited_params):
+                    collect_method = '_mx_collect'
                 itemspace_methods += textwrap.dedent("""\
-                def collect(self{comma}{signature}):
+                def {method}(self{comma}{signature}):
                     return _mx_sys.collect_from_space(
                         self, {domain}, {parameter!r}, ({names}), ({args}),
                         cache=self._mx_collect_cache)
 
                 """).format(domain=domain_expr, parameter=loop_name,
+                            method=collect_method,
                             comma=', ' if collect_signature else '',
                             signature=collect_signature, args=collect_args,
                             names=collect_names)
-                class_names.add('collect')
+                class_names.add(collect_method)
             delitem = self.delitem_asis
         else:
             itemspace_dict = ''
@@ -1055,7 +1062,7 @@ class SpaceTranslator(ParentTranslator):
 
         # _mx_copy_params on the enclosing ItemSpace roots assigns their
         # parameters here as well. See inherited_param_names.
-        slot_names.extend(self.inherited_param_names(space))
+        slot_names.extend(inherited_params)
         ref_assigns = self.ref_assigns(space)
         for name in dynamic_refs:
             if name not in space.refs:

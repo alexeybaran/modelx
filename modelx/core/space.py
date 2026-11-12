@@ -75,13 +75,17 @@ class BaseSpace(BaseParent, NodeFactory):
     def __getattr__(self, name):
 
         if self._impl.system.callstack.counter:     # TODO: check executer.is_executing instead
-            return getattr(self._impl.namespace, name)
-        else:
-            child = self._impl.get_attr(name)
-            if child is None:
-                raise AttributeError(f"Attribute '{name}' is not in space {str(self)}")
-            else:
-                return child.interface
+            namespace = self._impl.namespace
+            if name == "collect" and name not in namespace:
+                return self._mx_collect
+            return getattr(namespace, name)
+
+        child = self._impl.get_attr(name)
+        if child is not None:
+            return child.interface
+        if name == "collect":
+            return self._mx_collect
+        raise AttributeError(f"Attribute '{name}' is not in space {str(self)}")
 
     def __dir__(self):
         return list(self._impl.ns_dict)
@@ -624,12 +628,13 @@ class BaseSpace(BaseParent, NodeFactory):
     def __call__(self, *args, **kwargs):
         return self._impl.get_itemspace(args, kwargs).interface
 
-    def collect(self, *args, **kwargs):
+    def _mx_collect(self, *args, **kwargs):
         """Collect selected outputs over declared Space parameter domains.
 
         Normal ``Space(...)`` calls retain ordinary Dynamic-Space semantics.
-        ``collect()`` is available only when the Space was created with both
-        ``collect_over`` and ``collect_outputs``.
+        Call ``collect()`` on a Space created with both ``collect_over`` and
+        ``collect_outputs``. If the Space defines a member named ``collect``,
+        access that member normally and call ``_mx_collect()`` for aggregation.
         """
         if not isinstance(self._impl, UserSpaceImpl):
             raise TypeError("collect() is only available on a static UserSpace")

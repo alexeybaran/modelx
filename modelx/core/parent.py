@@ -117,7 +117,8 @@ class EditableParent(BaseParent):
             collect_over (optional): Mapping containing the one Space
                 parameter to iterate and its finite ordered domain (or a modelx
                 Reference/Cells returning it). Other Space parameters remain
-                ordinary arguments to ``collect()``.
+                ordinary arguments to ``collect()``. If a model member is named
+                ``collect``, call ``_mx_collect()`` to aggregate the outputs.
             collect_outputs (optional): Zero-argument formula evaluated in each
                 collected ItemSpace. It returns optional 'individual' and 'sum' output sections.
 
