@@ -156,7 +156,8 @@ def to_pandas(value, *, index_name=_MISSING):
     """
     import pandas as pd
     if not isinstance(value, (Table, Record)):
-        owner = getattr(value, '__modelx_table_owner__', None)
+        owner = (getattr(value, '__modelx_cython_owner__', None)
+                 or getattr(value, '__modelx_table_owner__', None))
         if callable(owner):
             value = owner()
     if not isinstance(value, (Table, Record)):

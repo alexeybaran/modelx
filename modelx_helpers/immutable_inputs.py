@@ -14,6 +14,8 @@ _MISSING = object()
 
 
 class Record(Mapping):
+    __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
+                             'owned-table-1', 'modelx_helpers.immutable_inputs.Record')
     __slots__ = ('_items', '_index', '_native_groups', '_metadata', '_preserve_scalar_types')
 
     def __init__(self, values, *, preserve_scalar_types=False):
@@ -93,6 +95,8 @@ class _TableIndex:
 
 
 class Table(Mapping):
+    __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
+                             'owned-table-1', 'modelx_helpers.immutable_inputs.Table')
     __slots__ = ('_keys', '_values', '_columns', '_positions', '_ordered', '_native_cache', '_index_error', '_metadata', '_preserve_scalar_types')
 
     def __init__(self, keys, values, columns, index_error=None, *, preserve_scalar_types=False):
