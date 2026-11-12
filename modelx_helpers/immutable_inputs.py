@@ -174,12 +174,10 @@ class Table(Mapping):
 
         return lookup_float(self, key, column, default)
 
-    def lookup_clamped_float(self, key, column, clamp, default=_MISSING) -> float:
+    def lookup_clamped_float(self, key, column, clamp_lower=False, default=_MISSING) -> float:
         """Read a float after clamping the key at the upper or both endpoints."""
-        if clamp == 'both':
+        if clamp_lower:
             key = max(key, int(min(self._keys)))
-        elif clamp != 'upper':
-            raise ValueError("clamp must be 'upper' or 'both'")
         key = min(key, int(max(self._keys)))
         return self.lookup_float(key, column) if default is _MISSING else self.lookup_float(key, column, default)
 
