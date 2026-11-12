@@ -50,6 +50,11 @@ class Record(Mapping):
         value = self[key]
         return value.slice(*keys) if keys else value
 
+    @property
+    def loc(self):
+        """Pandas-spelled reads through grouped tables: ``grouped.loc[(g1, ..., gn, key), "col"]``."""
+        return _RecordLoc(self)
+
     def __iter__(self):
         return iter(self._index)
 
@@ -68,6 +73,29 @@ class Record(Mapping):
 
     def __deepcopy__(self, memo):
         return self
+
+
+class _RecordLoc:
+    """Follow a full tuple key through grouped Records to the leaf Table."""
+
+    __slots__ = ('_record',)
+
+    def __init__(self, record):
+        self._record = record
+
+    def __getitem__(self, item):
+        column = None
+        if type(item) is tuple and len(item) == 2 and type(item[1]) is str and type(item[0]) is tuple:
+            item, column = item
+        parts = list(item) if type(item) is tuple else [item]
+        value = self._record
+        while parts and isinstance(value, Record):
+            value = value[parts.pop(0)]
+        if column is None:
+            return value.loc[tuple(parts) if len(parts) > 1 else parts[0]] if parts else value
+        if not isinstance(value, Table) or not parts:
+            raise KeyError(item)
+        return value.loc[tuple(parts) if len(parts) > 1 else parts[0], column]
 
 
 class _TableIndex:
@@ -92,6 +120,40 @@ class _TableIndex:
 
     def max_float(self) -> float:
         return float(max(self._table._keys))
+
+    def max(self):
+        """The largest row key, as ``pandas.Index.max``."""
+        return max(self._table._keys)
+
+    def min(self):
+        """The smallest row key, as ``pandas.Index.min``."""
+        return min(self._table._keys)
+
+
+class _TableLoc:
+    """Label-based reads with pandas spelling: ``table.loc[key, "col"]`` and ``table.loc[key]``.
+
+    ``loc[key, column]`` returns the stored value, like ``Table.lookup``. A tuple key
+    addresses a table with a multi-part index. ``loc[key]`` selects the row as a Record.
+    Only these two forms are supported; anything else raises ``TypeError``.
+    """
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __getitem__(self, item):
+        table = self._table
+        if type(item) is tuple and len(item) == 2 and type(item[1]) is str and item[1] in table._columns:
+            return table.lookup(item[0], item[1])
+        if type(item) is slice or (type(item) is tuple and any(type(part) is slice for part in item)):
+            raise TypeError('Table.loc supports loc[key, "column"] and loc[key], not slices')
+        metadata = table._metadata
+        if metadata is not None and metadata[0] == 'frame' and metadata[4] is not None:
+            return table.slice(item)
+        # Without pandas row metadata, the row is a Record of the stored values.
+        return Record(dict(zip(table._columns, (table.lookup(item, column) for column in table._columns))))
 
 
 class Table(Mapping):
@@ -218,6 +280,11 @@ class Table(Mapping):
     def index(self):
         """The table's complete row keys in their original order."""
         return _TableIndex(self)
+
+    @property
+    def loc(self):
+        """Pandas-spelled label reads; see :class:`_TableLoc`."""
+        return _TableLoc(self)
 
     def __reduce__(self):
         args = (self._keys, self._values, self._columns)
