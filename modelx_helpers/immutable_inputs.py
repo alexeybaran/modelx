@@ -129,6 +129,12 @@ class _TableIndex:
         """The smallest row key, as ``pandas.Index.min``."""
         return min(self._table._keys)
 
+    def __getattr__(self, name):
+        """Read-only pandas passthrough to the materialised index."""
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self._table.__getattr__('index'), name)
+
 
 class _TableLoc:
     """Label-based reads with pandas spelling: ``table.loc[key, "col"]`` and ``table.loc[key]``.
@@ -285,6 +291,21 @@ class Table(Mapping):
     def loc(self):
         """Pandas-spelled label reads; see :class:`_TableLoc`."""
         return _TableLoc(self)
+
+    def __getattr__(self, name):
+        """Read-only pandas passthrough for anything outside the table vocabulary.
+
+        ``table.iterrows()``, ``table.iloc[-1]``, ``table.columns`` and the like run on a
+        DataFrame materialised from the table, at pandas speed. The DataFrame is built once
+        and handed out as a copy-on-write copy, so changing it cannot change the table.
+        """
+        if name.startswith('_'):
+            raise AttributeError(name)
+        frame = self._native_cache.get('pandas_frame')
+        if frame is None:
+            from .table_operations import to_pandas
+            frame = self._native_cache.setdefault('pandas_frame', to_pandas(self))
+        return getattr(frame.copy(deep=False), name)
 
     def __reduce__(self):
         args = (self._keys, self._values, self._columns)
