@@ -174,15 +174,6 @@ class Table(Mapping):
 
         return lookup_float(self, key, column, default)
 
-    def lookup_clamped_float(self, key, column, clamp, default=_MISSING) -> float:
-        """Read a float after clamping the key at the upper or both endpoints."""
-        if clamp == 'both':
-            key = max(key, int(min(self._keys)))
-        elif clamp != 'upper':
-            raise ValueError("clamp must be 'upper' or 'both'")
-        key = min(key, int(max(self._keys)))
-        return self.lookup_float(key, column) if default is _MISSING else self.lookup_float(key, column, default)
-
     def lookup_int(self, key, column, default=_MISSING) -> int:
         """Read a table value using the typed integer lookup contract."""
         from .typed_inputs import lookup_int
