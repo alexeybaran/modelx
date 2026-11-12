@@ -12,7 +12,7 @@ import pytest
 def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ordered, expected):
     from concurrent import futures
     from modelx.export import _mx_sys as runtime
-    assert runtime._mx_collect_adapter_version == 1
+    assert runtime._mx_collect_adapter_version == 2
     monkeypatch.setattr(runtime, '_mx_parallel_workers', workers)
     monkeypatch.setattr(futures, 'as_completed', lambda tasks: (tasks[i] for i in (2, 0, 1, 3)))
     values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
@@ -64,8 +64,7 @@ def test_exported_parallel_collect_order_retry_and_shared_lock(tmp_path, monkeyp
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
         package = import_module(name)
-        runtime = import_module(name + '._mx_sys')
-        runtime._mx_parallel_workers = workers
+        package.mx_model._mx_collect_set_workers_v2(workers)
         policies = package.mx_model.Policies
         shared_calls = []
         package.mx_model.Shared.callback = lambda n: shared_calls.append(n) or n
@@ -120,10 +119,39 @@ def test_exported_parallel_shape_error_precedes_later_formula_error(tmp_path, mo
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
         package = import_module(name)
-        import_module(name + '._mx_sys')._mx_parallel_workers = workers
+        package.mx_model._mx_collect_set_workers_v2(workers)
         with pytest.raises(ValueError, match='modes changed'):
             package.mx_model.Policies.collect()
         assert not package.mx_model.Policies._mx_collect_cache
+    finally:
+        for module in tuple(sys.modules):
+            if module == name or module.startswith(name + '.'):
+                del sys.modules[module]
+
+
+@pytest.mark.parametrize('workers', [1, 2, 4])
+def test_generic_parallel_collect_adds_in_policy_order(tmp_path, monkeypatch, workers):
+    name = 'ordered_sum_export'
+    model = mx.new_model('OrderedSum')
+    try:
+        keys = (0, 1, 2, 3)
+        policies = model.new_space(
+            'Policies', formula='lambda key: None', collect_over={'key': keys},
+            refs={'keys': keys, 'amounts': (1e16, 0.0, -1e16, 1.0)},
+            collect_outputs='lambda: {"sum": {"total": amounts[key]}, '
+                            '"individual": {"amount": amounts[key]}}',
+        )
+        assert policies.collect().sum.total == 1.0
+        model.export(tmp_path / name)
+    finally:
+        model.close()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        package = import_module(name)
+        package.mx_model._mx_collect_set_workers_v2(workers)
+        result = package.mx_model.Policies.collect()
+        assert result.sum.total == 1.0
+        assert tuple(result.individual) == keys
     finally:
         for module in tuple(sys.modules):
             if module == name or module.startswith(name + '.'):

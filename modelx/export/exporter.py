@@ -305,11 +305,14 @@ class Exporter:
 
     def export(self):
         io_manager = DataManager(self.model)
+        parents = tuple(self.gen_parents())
+        has_collect = any(parent is not self.model and parent._impl.collect_over_spec is not None
+                          for parent in parents)
 
         # Create self.path dir and Write Model module
         write_str_utf8(
             ModelTranslator(self.model, io_manager,
-                            use_lock=bool(self.locked_spaces)).code,
+                            use_lock=bool(self.locked_spaces), has_collect=has_collect).code,
             self.path / (MODEL_MODULE + '.py'))
 
         # Write _mx_sys.py
@@ -321,7 +324,7 @@ class Exporter:
                 MacroTranslator(self.model).code,
                 self.path / (MACRO_MODULE + '.py'))
 
-        for parent in self.gen_parents():
+        for parent in parents:
 
             if parent is self.model:
                 init_line = f'from .{MODEL_MODULE} import ({MODEL_VAR}, {self.model.name})'
@@ -343,6 +346,9 @@ class Exporter:
                     SpaceTranslator(parent, io_manager, self.use_slots,
                                     self.locked_spaces).code,
                     cur_dir / (SPACE_MODULE + '.py'))
+
+        if has_collect:
+            copy_file(this_dir / '_mx_collect_semantics.py', self.path / '_mx_collect_semantics.py')
 
         # Write IO metadata
         ios = io_manager.get_literal_ios()
@@ -588,15 +594,16 @@ class ModelTranslator(ParentTranslator):
 
     lock_init = textwrap.dedent("""\
     # Lock shared by the locked Spaces
-    self.{LOCK_ATTR} = threading.RLock()
+    self.{lock_attr} = {constructor}()
 
-    """).format(LOCK_ATTR=LOCK_ATTR)
+    """)
 
     def __init__(self, parent: BaseParent, io_manager: DataManager,
-                 use_lock: bool = False):
+                 use_lock: bool = False, has_collect: bool = False):
         super().__init__(parent, io_manager)
         self.use_lock = use_lock
-        if use_lock:
+        self.has_collect = has_collect
+        if use_lock and not has_collect:
             self.threading_import = '\nimport threading'
 
     @cached_property
@@ -604,7 +611,10 @@ class ModelTranslator(ParentTranslator):
         space_assigns = self.space_assigns(self.parent)
         if self.use_lock:
             # Created before the Spaces, whose __init__ copies the reference.
-            space_assigns = self.lock_init + space_assigns
+            constructor = '_mx_sys._CollectLock' if self.has_collect else 'threading.RLock'
+            space_assigns = self.lock_init.format(lock_attr=LOCK_ATTR, constructor=constructor) + space_assigns
+        if self.has_collect:
+            space_assigns = 'self._mx_collect_init_v2()\n' + space_assigns
 
         result = self.class_template.format(
             name=self.parent.name,
@@ -612,9 +622,9 @@ class ModelTranslator(ParentTranslator):
             space_dict=textwrap.indent(self.space_dict(self.parent), ' ' * 8),
             ref_assigns=textwrap.indent(self.ref_assigns(self.parent), ' ' * 8)
         )
-        if self.use_lock:
+        if self.use_lock and self.has_collect:
             result += ('\n    def _mx_collect_parallel_allowed(self):\n'
-                       '        return not self._mx_lock._is_owned()\n')
+                       '        return not self._mx_lock.held_by_current_thread()\n')
         return result
 
     def space_assigns(self, parent):
