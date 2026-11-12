@@ -158,8 +158,30 @@ class _TableLoc:
         metadata = table._metadata
         if metadata is not None and metadata[0] == 'frame' and metadata[4] is not None:
             return table.slice(item)
-        # Without pandas row metadata, the row is a Record of the stored values.
-        return Record(dict(zip(table._columns, (table.lookup(item, column) for column in table._columns))))
+        # Without pandas row metadata, the row is a Record of the stored values. The key is
+        # resolved once and the stored row is zipped with the columns at C speed; the values
+        # are the table's own (already frozen) objects, so no per-column lookup is repeated.
+        if table._preserve_scalar_types:
+            # Raw (possibly mutable) cells: Record construction freezes them; keep that copy.
+            return Record(dict(zip(table._columns, (table.lookup(item, column) for column in table._columns))))
+        spec = table._index_error
+        if spec is None:
+            position = table._positions[item]
+        else:
+            if not _valid_index_key(item, spec):
+                raise KeyError(item)
+            try:
+                position = table._positions[_index_key(item, spec)]
+            except KeyError:
+                raise KeyError(item) from None
+        items = tuple(zip(table._columns, table._values[position]))
+        result = object.__new__(Record)
+        object.__setattr__(result, '_items', items)
+        object.__setattr__(result, '_index', MappingProxyType(dict(items)))
+        object.__setattr__(result, '_native_groups', {})
+        object.__setattr__(result, '_metadata', None)
+        object.__setattr__(result, '_preserve_scalar_types', False)
+        return result
 
 
 class Table(Mapping):

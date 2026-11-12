@@ -47,3 +47,25 @@ def test_grouped_full_key_matches_pandas(frames):
     for key in grouped.index:
         assert table.loc[key, 'premium_pp'] == grouped.loc[key, 'premium_pp']
     assert table.loc[('A', 'F')].loc[1, 'premium_pp'] == 2.0
+
+
+def test_loc_row_is_the_stored_record(frames):
+    """loc[key] without rows=True: an exact Record of the stored row, built without per-column lookups."""
+    import pickle
+    from modelx_helpers.immutable_inputs import Record, Table
+    plain, _ = frames
+    table = pdn.table(plain)
+    row = table.loc[31]
+    expected = Record(dict(zip(table._columns, (table.lookup(31, c) for c in table._columns))))
+    assert type(row) is Record and row == expected and row._items == expected._items
+    assert pickle.loads(pickle.dumps(row)) == expected
+    with pytest.raises(KeyError):
+        row['nope']
+    with pytest.raises(KeyError):
+        table.loc[33]
+    with pytest.raises(KeyError):
+        table.loc[True]                   # bool is not the integer label 1
+    bare = Table([1, 2], [(1, 2.0), (3, 4.0)], ['p', 'q'])
+    assert dict(bare.loc[2]) == {'p': 3, 'q': 4.0}
+    with pytest.raises(KeyError):
+        bare.loc[5]
