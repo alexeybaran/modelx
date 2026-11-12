@@ -98,14 +98,16 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     object_columns = tuple(i for i, dtype in enumerate(dtypes)
                            if getattr(dtype, 'kind', None) == 'O'
                            and not isinstance(dtype, pd.StringDtype))
-    names = list(frame.index.names)
+    source_index = frame.index
+    multi_index = isinstance(source_index, pd.MultiIndex)
+    names = list(source_index.names)
     groups = tuple(groups)
     if len(set(groups)) != len(groups):
         raise ValueError('group levels must be unique')
     if any(names.count(level) != 1 for level in groups):
         raise ValueError('group levels must name unique index levels')
     grouped_positions = [names.index(level) for level in groups]
-    remaining_positions = [i for i in range(frame.index.nlevels)
+    remaining_positions = [i for i in range(source_index.nlevels)
                            if i not in grouped_positions]
     if groups and not remaining_positions:
         raise ValueError('grouping must leave at least one leaf key level')
@@ -119,8 +121,8 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     else:
         source_rows = selected_frame.itertuples(index=False, name=None)
     original_objects = {}
-    for position, (label, row) in enumerate(zip(frame.index, source_rows)):
-        parts = tuple(label) if isinstance(frame.index, pd.MultiIndex) else (label,)
+    for position, (label, row) in enumerate(zip(source_index, source_rows)):
+        parts = tuple(label) if multi_index else (label,)
         parts = tuple(_key(part) for part in parts)
         leaf_parts = tuple(parts[i] for i in remaining_positions)
         key = leaf_parts[0] if len(leaf_parts) == 1 else leaf_parts

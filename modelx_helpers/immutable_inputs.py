@@ -249,27 +249,30 @@ def _restore_table(cls, args, metadata, preserve_scalar_types=False):
 
 
 def freeze(value):
+    kind = type(value)
+    if kind is int or kind is float or kind is str or kind is bool or kind is bytes or value is None:
+        return value
     if isinstance(value, (Record, Table)):
         return value
-    if type(value) is dict:
+    if kind is dict:
         if value.keys() == {'keys', 'values', 'columns'}:
             return Table(value['keys'], value['values'], value['columns'])
         return Record(value)
-    if type(value) in (tuple, list):
+    if kind is tuple or kind is list:
         return tuple(freeze(item) for item in value)
-    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+    if isinstance(value, (bool, int, float, str, bytes)):
         return value
-    if type(value).__module__.startswith('numpy'):
+    if kind.__module__.startswith('numpy'):
         import numpy as np
         if isinstance(value, (np.integer, np.floating, np.bool_)):
             return value
     # These pandas missing scalars are immutable, pickleable singletons. Keep
     # their identity: replacing NA/NaT with NaN changes conversion exceptions.
-    if type(value).__module__.startswith('pandas.'):
+    if kind.__module__.startswith('pandas.'):
         from pandas import NA, NaT
         if value is NA or value is NaT:
             return value
-    raise TypeError(f'unsupported immutable input value: {type(value).__name__}')
+    raise TypeError(f'unsupported immutable input value: {kind.__name__}')
 
 
 def _copy_container(value):
