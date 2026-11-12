@@ -174,14 +174,19 @@ class _TableLoc:
                 position = table._positions[_index_key(item, spec)]
             except KeyError:
                 raise KeyError(item) from None
-        items = tuple(zip(table._columns, table._values[position]))
-        result = object.__new__(Record)
-        object.__setattr__(result, '_items', items)
-        object.__setattr__(result, '_index', MappingProxyType(dict(items)))
-        object.__setattr__(result, '_native_groups', {})
-        object.__setattr__(result, '_metadata', None)
-        object.__setattr__(result, '_preserve_scalar_types', False)
-        return result
+        return _stored_row(table, position)
+
+
+def _stored_row(table, position):
+    """The exact Record of a stored row: the table's own (already frozen) values, zipped at C speed."""
+    items = tuple(zip(table._columns, table._values[position]))
+    result = object.__new__(Record)
+    object.__setattr__(result, '_items', items)
+    object.__setattr__(result, '_index', MappingProxyType(dict(items)))
+    object.__setattr__(result, '_native_groups', {})
+    object.__setattr__(result, '_metadata', None)
+    object.__setattr__(result, '_preserve_scalar_types', False)
+    return result
 
 
 class Table(Mapping):
@@ -289,6 +294,26 @@ class Table(Mapping):
         return row(self, key)
 
     row = slice
+
+    def iterrows(self):
+        """``(label, row)`` pairs in row order, like ``DataFrame.iterrows()`` but without pandas.
+
+        Each row is the Record ``loc[label]`` returns: with ``rows=True`` the pandas-coerced row,
+        otherwise the stored values. The rows are built once per table and shared (Records are
+        immutable), so iterating in a per-policy formula costs no pandas and no per-row copies.
+        """
+        rows = self._native_cache.get('iterrows')
+        if rows is None:
+            metadata = self._metadata
+            if metadata is not None and metadata[0] == 'frame' and metadata[4] is not None:
+                rows = tuple((key, self.slice(key)) for key in self._keys)
+            elif self._preserve_scalar_types:
+                rows = tuple((key, Record(dict(zip(self._columns, values))))
+                             for key, values in zip(self._keys, self._values))
+            else:
+                rows = tuple((key, _stored_row(self, position)) for position, key in enumerate(self._keys))
+            rows = self._native_cache.setdefault('iterrows', rows)
+        return iter(rows)
 
     def previous(self, key, column):
         if self._ordered is None:

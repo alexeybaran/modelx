@@ -69,3 +69,17 @@ def test_loc_row_is_the_stored_record(frames):
     assert dict(bare.loc[2]) == {'p': 3, 'q': 4.0}
     with pytest.raises(KeyError):
         bare.loc[5]
+
+
+def test_iterrows_without_pandas():
+    """Table.iterrows(): (label, row Record) pairs; values equal to DataFrame.iterrows(), rows shared."""
+    from modelx_helpers.immutable_inputs import Record
+    frame = pd.DataFrame({'jump_lo': [0.0, 1.5, 3], 'jump_hi': [1.5, 3.0, 99],
+                          'rate': [0.1, 0.3, 0.6], 'note': ['a', 'b', 'c']})
+    for table in (pdn.table(frame), pdn.table(frame, rows=True)):
+        got = list(table.iterrows())
+        assert [label for label, _ in got] == list(frame.index)
+        for (label, row), (_, expected) in zip(got, frame.iterrows()):
+            assert type(row) is Record
+            assert all(row[c] == expected[c] for c in frame.columns)
+        assert all(a is b for (_, a), (_, b) in zip(got, table.iterrows()))   # built once
