@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 import sys
 import threading
@@ -13,10 +14,11 @@ def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ord
     from concurrent import futures
     from modelx.export import _mx_sys as runtime
     assert runtime._mx_collect_adapter_version == 2
-    monkeypatch.setattr(runtime, '_mx_parallel_workers', workers)
     monkeypatch.setattr(futures, 'as_completed', lambda tasks: (tasks[i] for i in (2, 0, 1, 3)))
     values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
     base = SimpleNamespace(_model=SimpleNamespace())
+    runtime.BaseModel._mx_collect_init_v2(base._model)
+    runtime.BaseModel._mx_collect_set_workers_v2(base._model, workers)
     failure = LookupError('retry')
     failing = True
     def evaluate(coords):
@@ -33,11 +35,60 @@ def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ord
     with pytest.raises(LookupError) as error:
         collect()
     assert error.value is failure and not cache
-    assert not getattr(runtime._mx_collect_context, 'active', False)
+    assert not getattr(base._model._mx_collect_dispatch_state, 'active', False)
     failing = False
     result = collect()
     assert result.sum.value == expected
     assert collect() is result
+
+
+def test_v2_dispatch_is_isolated_across_models_and_threads():
+    from modelx.export import _mx_sys as runtime
+
+    models = (SimpleNamespace(), SimpleNamespace())
+    for model, workers in zip(models, (1, 4)):
+        runtime.BaseModel._mx_collect_init_v2(model)
+        runtime.BaseModel._mx_collect_set_workers_v2(model, workers)
+    bases = tuple(SimpleNamespace(_model=model) for model in models)
+    rendezvous = threading.Barrier(2)
+    serial_cache = {}
+    failure = LookupError('serial retry')
+
+    def total(coords):
+        return runtime.CollectResult({'sum': runtime.CollectResult({'value': sum(coords)})})
+
+    def evaluate_parallel_chunk(coords):
+        assert len(coords) == 2
+        assert models[1]._mx_collect_dispatch_state.active
+        assert not getattr(models[0]._mx_collect_dispatch_state, 'active', False)
+        return total(coords)
+
+    def evaluate_serial(coords):
+        assert models[0]._mx_collect_dispatch_state.active
+        assert not getattr(models[1]._mx_collect_dispatch_state, 'active', False)
+        rendezvous.wait(timeout=10)
+        raise failure
+
+    def collect_serial():
+        with pytest.raises(LookupError) as error:
+            runtime.collect_from_space(bases[0], range(8), 'key', (), (), cache=serial_cache,
+                                       evaluate_serial=evaluate_serial)
+        assert error.value is failure
+        assert not serial_cache
+        assert not models[0]._mx_collect_dispatch_state.active
+        return runtime.collect_from_space(bases[0], range(8), 'key', (), (), cache=serial_cache,
+                                          evaluate_serial=total)
+
+    def collect_parallel():
+        rendezvous.wait(timeout=10)
+        return runtime.collect_from_space(bases[1], range(8), 'key', (), (),
+                                          evaluate_serial=evaluate_parallel_chunk,
+                                          reuse_in_parallel=True, private_ordered=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        serial, parallel = pool.submit(collect_serial), pool.submit(collect_parallel)
+        assert serial.result(timeout=15).sum.value == 28
+        assert parallel.result(timeout=15).sum.value == 28
 
 
 @pytest.mark.parametrize('workers', [1, 2, 4])
