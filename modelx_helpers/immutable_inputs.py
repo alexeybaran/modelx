@@ -19,8 +19,8 @@ class Record(Mapping):
     __slots__ = ('_items', '_index', '_native_groups', '_metadata', '_preserve_scalar_types')
 
     def __init__(self, values, *, preserve_scalar_types=False):
-        items = tuple((key, value if preserve_scalar_types else freeze(value))
-                      for key, value in values.items())
+        items = (tuple(values.items()) if preserve_scalar_types else
+                 tuple((key, freeze(value)) for key, value in values.items()))
         object.__setattr__(self, '_items', items)
         object.__setattr__(self, '_index', MappingProxyType(dict(items)))
         object.__setattr__(self, '_native_groups', {})
