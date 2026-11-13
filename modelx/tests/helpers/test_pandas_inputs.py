@@ -239,3 +239,34 @@ def test_rectangular_axes_keep_source_order():
     assert axes == (('M', 'F'), (2, 1))
     assert result.lookup_float(('F', 2), 'value') == 3.0
     pd.testing.assert_frame_equal(pdn.to_pandas(result), frame)
+
+
+def test_selected_contiguous_columns_preserve_lookup_and_reporting():
+    from modelx_helpers import pdn
+    from modelx_helpers.immutable_inputs import _CONTIGUOUS_STORAGE
+
+    index = pd.MultiIndex.from_product([['B', 'A'], [4, 5]], names=['group', 'year'])
+    frame = pd.DataFrame({'a': [2**53 + 1, 2, 3, 4], 'note': ['source'] * 4,
+                          'b': [5, 6, 7, 8]}, index=index)
+    frame.columns.name = 'inputs'
+    frame.attrs['source'] = ['original']
+    expected = frame.loc[:, ['b', 'a']].copy(deep=True)
+    grouped = pdn.table(frame, columns=('b', 'a'), groups=('group',),
+                        report=True, preserve_scalar_types=True)
+    leaf = grouped['B']
+    assert _CONTIGUOUS_STORAGE in leaf._native_cache
+    assert type(leaf.lookup(4, 'a')) is np.int64
+    assert leaf.lookup(4, 'a') == 2**53 + 1
+    frame.loc[('B', 4), 'a'] = 0
+    frame.attrs['source'].append('changed')
+    pd.testing.assert_frame_equal(pdn.to_pandas(grouped), expected)
+    pd.testing.assert_frame_equal(pdn.to_pandas(leaf), expected.loc['B'])
+    assert pdn.to_pandas(leaf).attrs == expected.attrs
+
+    simple = pd.DataFrame({'a': [1.25, 2.5], 'note': ['source'] * 2,
+                           'b': [3.75, 4.5]}, index=pd.Index([4, 5], name='year'))
+    selected = pdn.table(simple, columns=('b', 'a'), indexing='at')
+    assert _CONTIGUOUS_STORAGE in selected._native_cache
+    assert type(selected.lookup(4, 'a')) is float
+    assert selected.lookup(4, 'a') == 1.25
+    pd.testing.assert_frame_equal(pdn.to_pandas(selected), simple.loc[:, ['b', 'a']])

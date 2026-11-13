@@ -113,39 +113,13 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
     source_index = frame.index
-    if (type(frame) is pd.DataFrame
-            and (type(source_index) is pd.MultiIndex or type(source_index) in (pd.Index, pd.RangeIndex)
-                 and source_index.dtype == np.dtype('int64'))
-            and type(groups) is tuple and not groups
-            and rows is False and report is False and preserve_scalar_types is False
-            and len(selected) == 1 and type(frame.columns) is pd.Index
-            and frame.columns.dtype.kind in 'OU'):
-        # A lookup-only single column needs the Series data and original axes.
-        # Taking the column axis preserves its dtype, name, and label order.
-        offset = frame.columns.get_indexer(selected)[0]
-        if offset >= 0:
-            series = frame[selected[0]]
-            dtype = series.dtype
-            if dtype == np.dtype('float64'):
-                metadata = ('axes', source_index.copy(deep=True), frame.columns.take([offset]), (dtype,))
-                if type(source_index) is pd.MultiIndex:
-                    axes = _rectangular_axes(source_index)
-                    if axes is not None:
-                        data = series.to_numpy(copy=True)
-                        data.setflags(write=False)
-                        return Table._from_rectangular(axes, data, tuple(selected), index_error, metadata)
-                elif len(source_index) and source_index.dtype == np.dtype('int64'):
-                    keys = tuple(source_index)
-                    if keys == tuple(range(keys[0], keys[0] + len(keys))):
-                        data = series.to_numpy(copy=True).reshape((-1, 1))
-                        data.setflags(write=False)
-                        return Table._from_contiguous(keys, data, tuple(selected), index_error, metadata, False)
-                if type(source_index) is pd.MultiIndex:
-                    keys, exact_keys = _keys_from_index(source_index)
-                    values = ((scalar,) for scalar in series.to_numpy(copy=False).tolist())
-                    result = Table._from_float64(keys, values, selected, index_error, exact_keys=exact_keys)
-                    object.__setattr__(result, '_metadata', metadata)
-                    return result
+    if (type(frame) is pd.DataFrame and type(frame.columns) is pd.Index
+            and frame.columns.dtype.kind in 'OU' and type(groups) is tuple and rows is False
+            and type(report) is bool and type(preserve_scalar_types) is bool):
+        prepared = _selected_numeric_table(frame, selected, groups, index_error, report,
+                                           preserve_scalar_types)
+        if prepared is not None:
+            return prepared
     if type(frame) is pd.DataFrame and tuple(frame.columns) == tuple(selected):
         selected_frame = frame
     else:
@@ -265,6 +239,69 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     return build(root, 0)[0]
 
 
+def _selected_numeric_table(frame, selected, groups, index_error, report, preserve_scalar_types):
+    """Copy numeric Series directly into the compact table's owned storage."""
+    index = frame.index
+    multi = type(index) is pd.MultiIndex
+    if groups:
+        if (len(groups) != 1 or type(groups[0]) is not str or not multi or index.nlevels != 2
+                or index.names[0] != groups[0] or index.names[1] == groups[0]):
+            return None
+    elif (report is not False or preserve_scalar_types is not False
+          or not multi and (type(index) not in (pd.Index, pd.RangeIndex) or index.dtype != np.dtype('int64'))
+          or multi and len(selected) != 1):
+        return None
+    try:
+        offsets = [frame.columns.get_loc(name) for name in selected]
+    except KeyError:
+        return None
+    series = tuple(frame[name] for name in selected)
+    dtype = series[0].dtype
+    if ((dtype != np.dtype('float64') and (not groups or not preserve_scalar_types or dtype != np.dtype('int64')))
+            or any(column.dtype != dtype for column in series[1:])):
+        return None
+    if multi:
+        axes = _rectangular_axes(index)
+        keys = axes[1] if groups and axes is not None else None
+    else:
+        keys = tuple(index)
+    if keys is not None and (not keys or type(keys[0]) is not int
+                             or keys != tuple(range(keys[0], keys[0] + len(keys)))):
+        return None
+    if groups and keys is None:
+        return None
+
+    column_axis = frame.columns.take(offsets)
+    metadata = ('axes', index.copy(deep=True), column_axis, (dtype,) * len(series))
+    columns = tuple(selected)
+    if groups:
+        data = _owned_numeric_columns(series, dtype)
+        return _contiguous_groups(frame, columns, axes, metadata, data, preserve_scalar_types, report)
+    if not multi:
+        data = _owned_numeric_columns(series, dtype)
+        return Table._from_contiguous(keys, data, columns, index_error, metadata, False)
+    if axes is not None:
+        data = series[0].to_numpy(copy=True)
+        data.setflags(write=False)
+        return Table._from_rectangular(axes, data, columns, index_error, metadata)
+    keys, exact_keys = _keys_from_index(index)
+    values = ((scalar,) for scalar in series[0].to_numpy(copy=False).tolist())
+    result = Table._from_float64(keys, values, columns, index_error, exact_keys=exact_keys)
+    object.__setattr__(result, '_metadata', metadata)
+    return result
+
+
+def _owned_numeric_columns(series, dtype):
+    if len(series) == 1:
+        data = series[0].to_numpy(copy=True).reshape((-1, 1))
+    else:
+        data = np.empty((len(series[0]), len(series)), dtype=dtype)
+        for position, column in enumerate(series):
+            data[:, position] = column.to_numpy(copy=False)
+    data.setflags(write=False)
+    return data
+
+
 def _rectangular_axes(index):
     from math import prod
 
@@ -301,7 +338,10 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
             if keys == tuple(range(keys[0], keys[0] + len(keys))) and (
                     all(dtype == dtypes[0] for dtype in dtypes)
                     and dtypes[0] in (np.dtype('int64'), np.dtype('float64'))):
-                return _contiguous_groups(frame, columns, axes, dtypes, preserve_scalar_types, report)
+                data = np.array(frame.to_numpy(copy=False), order='C', copy=True)
+                data.setflags(write=False)
+                return _contiguous_groups(frame, tuple(columns), axes, _axes_metadata(frame, dtypes),
+                                          data, preserve_scalar_types, report)
     codes = frame.index.codes
     leaf_axis = 1 - group_axis
     grouped = {}
@@ -339,11 +379,8 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
     return result
 
 
-def _contiguous_groups(frame, columns, axes, dtypes, preserve_scalar_types, report):
-    metadata = _axes_metadata(frame, dtypes)
+def _contiguous_groups(frame, columns, axes, metadata, data, preserve_scalar_types, report):
     leaf_spec = _pandas_index_spec(frame.index.levels[1]) if report else None
-    data = np.array(frame.to_numpy(copy=False), order='C', copy=True)
-    data.setflags(write=False)
     groups, keys = axes
     tables = {}
     width = len(keys)
@@ -354,10 +391,10 @@ def _contiguous_groups(frame, columns, axes, dtypes, preserve_scalar_types, repo
         if report:
             leaf_metadata = ('frame', index, *metadata[2:], None, (), deepcopy(frame.attrs),
                              frame.flags.allows_duplicate_labels, (),
-                             (frame.columns.dtype, frame.columns.name), None)
+                             (metadata[2].dtype, metadata[2].name), None)
         else:
             leaf_metadata = ('axes', index, *metadata[2:])
-        tables[group] = Table._from_contiguous(keys, data[start:start + width], tuple(columns),
+        tables[group] = Table._from_contiguous(keys, data[start:start + width], columns,
                                                 leaf_spec, leaf_metadata, preserve_scalar_types)
     result = Record(tables)
     object.__setattr__(result, '_metadata', ('grouped', *metadata[1:], range(len(data))))
