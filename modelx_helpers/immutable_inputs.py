@@ -11,6 +11,7 @@ from types import MappingProxyType
 
 
 _MISSING = object()
+_RECTANGULAR_STORAGE = object()
 
 
 class Record(Mapping):
@@ -139,6 +140,39 @@ class Table(Mapping):
         object.__setattr__(self, '_index_error', freeze(index_error))
         object.__setattr__(self, '_metadata', None)
         object.__setattr__(self, '_preserve_scalar_types', bool(preserve_scalar_types))
+
+    @classmethod
+    def _from_rectangular(cls, axes, data, columns, index_error, metadata):
+        table = cls.__new__(cls)
+        object.__setattr__(table, '_columns', columns)
+        object.__setattr__(table, '_native_cache', {_RECTANGULAR_STORAGE: (axes, data)})
+        object.__setattr__(table, '_index_error', index_error)
+        object.__setattr__(table, '_metadata', metadata)
+        object.__setattr__(table, '_preserve_scalar_types', False)
+        return table
+
+    def __getattr__(self, name):
+        # Rectangular numeric tables own the axes and values without allocating
+        # their expanded Python representation until it is actually used.
+        if name not in ('_keys', '_values', '_positions', '_ordered'):
+            raise AttributeError(name)
+        from itertools import product
+
+        cache = object.__getattribute__(self, '_native_cache')
+        storage = cache.get(_RECTANGULAR_STORAGE)
+        if storage is None:
+            raise AttributeError(name)
+        axes, data = storage
+        if name == '_keys':
+            result = tuple(product(*axes))
+        elif name == '_values':
+            result = tuple((value,) for value in data.tolist())
+        elif name == '_positions':
+            result = MappingProxyType(dict(zip(self._keys, range(len(data)))))
+        else:
+            result = tuple(sorted(self._keys))
+        object.__setattr__(self, name, result)
+        return result
 
     def __setattr__(self, name, value):
         raise AttributeError('immutable input')

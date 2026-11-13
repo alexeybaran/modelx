@@ -125,11 +125,16 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
             series = frame[selected[0]]
             dtype = series.dtype
             if dtype == np.dtype('float64'):
+                metadata = ('axes', source_index.copy(deep=True), frame.columns.take([offset]), (dtype,))
+                axes = _rectangular_axes(source_index)
+                if axes is not None:
+                    data = series.to_numpy(copy=True)
+                    data.setflags(write=False)
+                    return Table._from_rectangular(axes, data, tuple(selected), index_error, metadata)
                 keys, exact_keys = _keys_from_index(source_index)
                 values = ((scalar,) for scalar in series.to_numpy(copy=False).tolist())
                 result = Table._from_float64(keys, values, selected, index_error, exact_keys=exact_keys)
-                object.__setattr__(result, '_metadata', ('axes', source_index.copy(deep=True),
-                                                         frame.columns.take([offset]), (dtype,)))
+                object.__setattr__(result, '_metadata', metadata)
                 return result
     if type(frame) is pd.DataFrame and tuple(frame.columns) == tuple(selected):
         selected_frame = frame
@@ -248,6 +253,26 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         return result, positions
 
     return build(root, 0)[0]
+
+
+def _rectangular_axes(index):
+    from math import prod
+
+    levels = index.levels
+    shape = tuple(len(level) for level in levels)
+    if not len(index) or prod(shape) != len(index):
+        return None
+    axes = tuple(tuple(level) for level in levels)
+    if any(type(part) not in (str, int) for labels in axes for part in labels):
+        return None
+    strides = [1]
+    for size in reversed(shape[1:]):
+        strides.append(strides[-1] * size)
+    for size, stride, codes in zip(shape, reversed(strides), index.codes):
+        digits = np.arange(size, dtype=codes.dtype).reshape((1, size, 1))
+        if not np.all(codes.reshape((-1, size, stride)) == digits):
+            return None
+    return axes
 
 
 def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report):
