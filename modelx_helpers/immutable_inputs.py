@@ -1141,3 +1141,101 @@ class _TableIndex:
         if name.startswith('_'):
             raise AttributeError(name)
         return getattr(self._pandas_index(), name)
+
+
+# ---------------------------------------------------------------------------
+# Contracts for the compiler (round 3, W1.H). Neither expands compact storage.
+
+def table_storage(table):
+    """The table's own storage, for the compiler's table handle.
+
+    Returns one of
+      ``('contiguous', start, data, columns, spec)``   int keys ``start .. start + len(data) - 1``;
+                                                       ``data`` a read-only C-ordered ndarray of
+                                                       shape (rows, len(columns))
+      ``('rectangular', axes, data, columns, spec)``   keys = the product of ``axes`` (tuples of
+                                                       labels, in stored order, last axis fastest);
+                                                       ``data`` a read-only 1-D float64 ndarray, one
+                                                       column
+      ``('rows', keys, values, ordered, columns, spec)`` keys and value tuples in row order;
+                                                       ``ordered`` the sorted keys or None
+    ``columns`` is the tuple of column names and ``spec`` the pandas index spec Record
+    (``multi``, ``boolean_modes``, ...) or None. The objects are the table's own; do not
+    change them. Sub-tables (``loc[prefix]``) report their own storage.
+    """
+    if not isinstance(table, Table):
+        raise TypeError('table_storage requires a Table')
+    storage = _storage_of(table)
+    if storage[0] == 'contiguous':
+        return ('contiguous', storage[1], storage[2], table._columns, table._index_error)
+    if storage[0] == 'rectangular':
+        return ('rectangular', storage[1], storage[2], table._columns, table._index_error)
+    return ('rows', table._keys, table._values, table._ordered, table._columns, table._index_error)
+
+
+def _value_kind(value):
+    kind = type(value)
+    if kind is bool:
+        return 'bool'
+    if kind is int:
+        return 'int'
+    if kind is float:
+        return 'float'
+    if kind is str:
+        return 'str'
+    from enum import Enum
+    if isinstance(value, Enum):
+        return f'enum:{kind.__module__}.{kind.__qualname__}'
+    if kind.__module__ == 'numpy':
+        import numpy as np
+        if isinstance(value, np.bool_):
+            return 'bool'
+        if isinstance(value, np.integer):
+            return 'int'
+        if isinstance(value, np.floating):
+            return 'float'
+    return None
+
+
+def _common_kind(values):
+    kinds = {_value_kind(value) for value in values}
+    return kinds.pop() if len(kinds) == 1 else None
+
+
+def _dtype_kind(dtype):
+    return {'f': 'float', 'i': 'int', 'u': 'int', 'b': 'bool'}.get(dtype.kind)
+
+
+def table_schema(table):
+    """Key-level and column kinds of a table, read without expanding compact storage.
+
+    ``{'storage': 'contiguous' | 'rectangular' | 'rows', 'rows': row count,
+       'keys': (kind of level 0, ...), 'columns': {name: kind}}``
+    A kind is ``'bool'``, ``'int'``, ``'float'``, ``'str'``, ``'enum:<module>.<qualname>'``
+    for enum members kept as labels or values, or None (mixed, missing or other values,
+    or an empty table). Tables prepared from pandas hold IntEnum labels as plain ints
+    (pandas stores them as int64), so their levels report ``'int'``.
+    """
+    if not isinstance(table, Table):
+        raise TypeError('table_schema requires a Table')
+    storage = _storage_of(table)
+    columns = table._columns
+    if storage[0] == 'contiguous':
+        keys = ('int',)
+        kind = _dtype_kind(storage[2].dtype)
+        column_kinds = {name: kind for name in columns}
+        if storage[2].dtype.kind == 'O':
+            column_kinds = {name: _common_kind(storage[2][:, i]) for i, name in enumerate(columns)}
+    elif storage[0] == 'rectangular':
+        keys = tuple(_common_kind(axis) for axis in storage[1])
+        column_kinds = {columns[0]: _dtype_kind(storage[2].dtype)}
+    else:
+        rows = table._keys
+        levels = _levels(table)
+        if levels > 1:
+            keys = tuple(_common_kind(key[level] for key in rows) for level in range(levels))
+        else:
+            keys = (_common_kind(rows),)
+        values = table._values
+        column_kinds = {name: _common_kind(row[i] for row in values) for i, name in enumerate(columns)}
+    return {'storage': storage[0], 'rows': _row_count(table), 'keys': keys, 'columns': column_kinds}
