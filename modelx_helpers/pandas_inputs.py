@@ -273,7 +273,8 @@ def _rectangular_axes(index):
     if not len(index) or prod(shape) != len(index):
         return None
     axes = tuple(tuple(level) for level in levels)
-    if any(type(part) not in (str, int) for labels in axes for part in labels):
+    if any(len(set(labels)) != len(labels) or any(type(part) not in (str, int) for part in labels)
+           for labels in axes):
         return None
     strides = [1]
     for size in reversed(shape[1:]):
@@ -285,7 +286,7 @@ def _rectangular_axes(index):
         if not np.all(blocks == digits.reshape((1, size, 1))):
             return None
         original = tuple(int(digit) for digit in digits)
-        if min(original) < 0 or len(set(original)) != size:
+        if min(original) < 0 or max(original) >= size or len(set(original)) != size:
             return None
         ordered.append(tuple(labels[digit] for digit in original))
     return tuple(ordered)

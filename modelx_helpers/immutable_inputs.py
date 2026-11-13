@@ -145,8 +145,9 @@ class Table(Mapping):
     @classmethod
     def _from_rectangular(cls, axes, data, columns, index_error, metadata):
         table = cls.__new__(cls)
+        positions = tuple(MappingProxyType(dict(zip(labels, range(len(labels))))) for labels in axes)
         object.__setattr__(table, '_columns', columns)
-        object.__setattr__(table, '_native_cache', {_RECTANGULAR_STORAGE: (axes, data)})
+        object.__setattr__(table, '_native_cache', {_RECTANGULAR_STORAGE: (axes, data, positions)})
         object.__setattr__(table, '_index_error', index_error)
         object.__setattr__(table, '_metadata', metadata)
         object.__setattr__(table, '_preserve_scalar_types', False)
@@ -187,7 +188,7 @@ class Table(Mapping):
                 raise AttributeError(name)
             object.__setattr__(self, name, result)
             return result
-        axes, data = storage
+        axes, data, _ = storage
         if name == '_keys':
             result = tuple(product(*axes))
         elif name == '_values':
@@ -228,7 +229,16 @@ class Table(Mapping):
                 column = self._columns.index(name)
             except ValueError:
                 raise KeyError(name) from None
-        if self._index_error is None:
+        rectangular = self._native_cache.get(_RECTANGULAR_STORAGE)
+        contiguous = self._native_cache.get(_CONTIGUOUS_STORAGE)
+        if rectangular is not None or contiguous is not None:
+            try:
+                position = self._compact_position(key, rectangular, contiguous)
+            except KeyError:
+                if self._index_error is None:
+                    raise
+                raise KeyError(key) from None
+        elif self._index_error is None:
             position = self._positions[key]
         else:
             if not _valid_index_key(key, self._index_error):
@@ -238,7 +248,58 @@ class Table(Mapping):
             except KeyError:
                 raise KeyError(key) from None
         column = self._columns.index(column) if isinstance(column, str) else column
+        if rectangular is not None:
+            return (float(rectangular[1][position]),)[column]
+        if contiguous is not None:
+            values = contiguous[1][position]
+            return (tuple(values) if self._preserve_scalar_types else tuple(values.tolist()))[column]
         return self._values[position][column]
+
+    def _compact_position(self, key, rectangular, contiguous):
+        spec = self._index_error
+        if spec is not None:
+            if not _valid_index_key(key, spec):
+                raise KeyError(key)
+            key = _index_key(key, spec)
+        if rectangular is not None:
+            if type(key) is not tuple:
+                return self._positions[key]
+            if any(part is _INDEX_NAN for part in key):
+                raise KeyError(key)
+            if not all(type(part) in (str, int, float) or type(part).__module__ == 'numpy' for part in key):
+                return self._positions[key]
+            position = 0
+            try:
+                for label, positions in zip(key, rectangular[2]):
+                    position = position * len(positions) + positions[label]
+            except KeyError:
+                raise KeyError(key) from None
+            return position
+        start, data = contiguous
+        if type(key) is int or type(key) is bool:
+            position = key - start
+        elif type(key) is float and key.is_integer():
+            position = int(key) - start
+        elif type(key) in (str, bytes, float) or key is None:
+            raise KeyError(key)
+        else:
+            if type(key).__module__ == 'numpy':
+                from numpy import integer, floating
+            else:
+                return self._positions[key]
+            if isinstance(key, (integer, floating)):
+                try:
+                    number = int(key)
+                except (ValueError, OverflowError):
+                    raise KeyError(key) from None
+                if key != number or hash(key) != hash(number):
+                    raise KeyError(key)
+                position = number - start
+            else:
+                return self._positions[key]
+        if 0 <= position < len(data):
+            return position
+        raise KeyError(key)
 
     def lookup_float(self, key, column, default=_MISSING) -> float:
         """Read a table value using the typed float lookup contract."""
@@ -281,6 +342,14 @@ class Table(Mapping):
         return self.lookup(self._ordered[index], column)
 
     def contains(self, key):
+        rectangular = self._native_cache.get(_RECTANGULAR_STORAGE)
+        contiguous = self._native_cache.get(_CONTIGUOUS_STORAGE)
+        if rectangular is not None or contiguous is not None:
+            try:
+                self._compact_position(key, rectangular, contiguous)
+            except KeyError:
+                return False
+            return True
         if self._index_error is None:
             return key in self._positions
         return (_valid_index_key(key, self._index_error)
