@@ -129,6 +129,24 @@ class _TableIndex:
         """The smallest row key, as ``pandas.Index.min``."""
         return min(self._table._keys)
 
+    def asof(self, label):
+        """The last label <= ``label``, NaN below the first one, as ``pandas.Index.asof``.
+
+        Scalar labels stored in increasing order are searched directly; any other index (tuple
+        labels, labels not in increasing order) runs the pandas method on the materialised index,
+        with its results and errors.
+        """
+        table = self._table
+        increasing = table._native_cache.get('asof_increasing')
+        if increasing is None:
+            increasing = table._native_cache.setdefault('asof_increasing', bool(
+                table._keys and table._ordered is not None and table._keys == table._ordered
+                and not any(type(key) is tuple for key in table._keys)))
+        if not increasing:
+            return self.__getattr__('asof')(label)
+        position = bisect_right(table._keys, label) - 1
+        return table._keys[position] if position >= 0 else float('nan')
+
     def __getattr__(self, name):
         """Read-only pandas passthrough to the materialised index."""
         if name.startswith('_'):

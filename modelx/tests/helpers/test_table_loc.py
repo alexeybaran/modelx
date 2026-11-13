@@ -83,3 +83,23 @@ def test_iterrows_without_pandas():
             assert type(row) is Record
             assert all(row[c] == expected[c] for c in frame.columns)
         assert all(a is b for (_, a), (_, b) in zip(got, table.iterrows()))   # built once
+
+
+@pytest.mark.parametrize('labels, queries', [
+    ([1, 3, 7], (0, 1, 2, 5, 9)),            # below first, exact, between, above last
+    ([1.5, 2.5], (0, 1, 2, 9)),
+    (['a', 'c'], ('0', 'a', 'b', 'z')),
+    ([7, 1, 3], (0, 2, 9)),                  # not monotonic: pandas raises, so does the helper
+])
+def test_index_asof_matches_pandas(labels, queries):
+    import math
+    frame = pd.DataFrame({'v': range(len(labels))}, index=pd.Index(labels, name='k'))
+    table = pdn.table(frame)
+    def outcome(read):
+        try:
+            value = read()
+        except Exception as exc:          # noqa: BLE001 - compare the exception types
+            return type(exc)
+        return 'nan' if isinstance(value, float) and math.isnan(value) else value
+    for label in queries:
+        assert outcome(lambda: table.index.asof(label)) == outcome(lambda: frame.index.asof(label)), label
