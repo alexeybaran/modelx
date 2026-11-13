@@ -235,7 +235,7 @@ def test_rectangular_axes_keep_source_order():
     from modelx_helpers import pdn
 
     result = pdn.table(frame, columns=('value',))
-    axes, _ = result._native_cache[_RECTANGULAR_STORAGE]
+    axes = result._native_cache[_RECTANGULAR_STORAGE][0]
     assert axes == (('M', 'F'), (2, 1))
     assert result.lookup_float(('F', 2), 'value') == 3.0
     pd.testing.assert_frame_equal(pdn.to_pandas(result), frame)
