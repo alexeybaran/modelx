@@ -209,23 +209,44 @@ def _key_prefix(table, item):
 
 def _sub_table(table, item, prefix):
     """``table.loc[prefix]`` on a multi-level table, as pandas: the matching rows with the selected
-    levels dropped (a scalar key when one level is left); KeyError(item) when nothing matches."""
+    levels dropped (a scalar key when one level is left); KeyError(item) when nothing matches.
+
+    The child is a pure function of this immutable table and the prefix VALUE, so it is built once
+    and shared (Decision 13.3): the first selection at a prefix depth groups the rows by prefix in
+    one pass; each child is built on its first selection. Both live in ``_native_cache`` (owned by
+    the table, uncapped), set with ``setdefault`` as the ``iterrows`` rows are.
+    """
     count, spec = len(prefix), table._index_error
     modes = spec['boolean_modes'] if spec is not None else ()
     for part, mode in zip(prefix, modes):
         boolean = type(part) is bool or type(part).__name__ == 'bool_'
         if (mode == 1 and not boolean) or (mode == 2 and boolean):
             raise KeyError(item)
-    rows = [(key[count:] if len(key) - count > 1 else key[count], values)
-            for key, values in zip(table._keys, table._values) if key[:count] == prefix]
-    if not rows:
+    cache = table._native_cache
+    groups = cache.get(('prefix_rows', count))
+    if groups is None:
+        grouping = {}
+        for position, key in enumerate(table._keys):
+            grouping.setdefault(key[:count], []).append(position)
+        groups = cache.setdefault(('prefix_rows', count), grouping)
+    children = cache.get(('prefix_children', count))
+    if children is None:
+        children = cache.setdefault(('prefix_children', count), {})
+    child = children.get(prefix)
+    if child is not None:
+        return child
+    positions = groups.get(prefix)
+    if positions is None:
         raise KeyError(item)
+    keys, values = table._keys, table._values
     sub_spec = None
     if spec is not None:
         sub_spec = dict(spec._index)
-        sub_spec.update(multi=len(table._keys[0]) - count > 1, boolean_modes=tuple(modes[count:]))
-    return Table([key for key, _ in rows], [values for _, values in rows], table._columns, sub_spec,
-                 preserve_scalar_types=table._preserve_scalar_types)
+        sub_spec.update(multi=len(keys[0]) - count > 1, boolean_modes=tuple(modes[count:]))
+    child = Table([keys[p][count:] if len(keys[p]) - count > 1 else keys[p][count] for p in positions],
+                  [values[p] for p in positions], table._columns, sub_spec,
+                  preserve_scalar_types=table._preserve_scalar_types)
+    return children.setdefault(prefix, child)
 
 
 class _TableColumn(Mapping):

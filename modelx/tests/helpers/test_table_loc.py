@@ -139,3 +139,21 @@ def test_partial_key_selection_matches_pandas(prefix):
                 with pytest.raises(KeyError):
                     column[k]
         assert list(sub['w']) == list(expected['w']) and sub['w'].index.max() == expected['w'].index.max()
+
+
+def test_partial_key_selection_is_shared_by_prefix_value():
+    import enum
+
+    class Sex(enum.IntEnum):
+        F = 0
+        M = 1
+    frame = pd.DataFrame({'a': [0, 0, 1, 1], 'y': [1, 2, 1, 3], 'v': [1., 2., 3., 4.]}).set_index(['a', 'y'])
+    table = pdn.table(frame)
+    assert table.loc[0] is table.loc[0] is table.loc[Sex.F] is table.loc[(0,)]
+    assert table.loc[1] is not table.loc[0]
+    assert list(table.loc[Sex.M]._keys) == [1, 3]
+    text = pdn.table(_prefix_frame())
+    key = ''.join(['M', ''])        # an equal str value, not the same object
+    assert text.loc[(key, 'A')] is text.loc[('M', 'A')] and text.loc[('M', 'B')] is not text.loc[('M', 'A')]
+    with pytest.raises(KeyError):
+        text.loc[('M', 'Z')]
