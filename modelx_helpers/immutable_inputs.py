@@ -103,13 +103,26 @@ class Table(Mapping):
         keys, columns = tuple(keys), tuple(columns)
         values = tuple(tuple(value if preserve_scalar_types else freeze(value)
                              for value in row) for row in values)
+        Table._initialize(self, keys, values, columns, index_error, preserve_scalar_types)
+
+    @classmethod
+    def _from_float64(cls, keys, values, columns, index_error, *, exact_keys):
+        """Own ndarray.tolist() rows, whose values are already immutable floats."""
+        table = cls.__new__(cls)
+        Table._initialize(table, tuple(keys), tuple(map(tuple, values)), tuple(columns),
+                          index_error, False, exact_keys=exact_keys)
+        return table
+
+    def _initialize(self, keys, values, columns, index_error, preserve_scalar_types,
+                    *, exact_keys=False):
         if not columns or len(set(columns)) != len(columns):
             raise ValueError('table columns must be nonempty and unique')
         if any(type(column) is not str for column in columns):
             raise TypeError('table columns must be strings')
         if len(keys) != len(values) or any(len(row) != len(columns) for row in values):
             raise ValueError('table dimensions do not match')
-        position_keys = keys if index_error is None else tuple(_index_key(key, index_error) for key in keys)
+        position_keys = (keys if index_error is None or exact_keys
+                         else tuple(_index_key(key, index_error) for key in keys))
         positions = dict(zip(position_keys, range(len(keys))))
         if len(positions) != len(keys):
             raise ValueError('duplicate table key')
