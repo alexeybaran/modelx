@@ -58,6 +58,17 @@ def _column_scalars(column):
     return (column.iloc[position] for position in range(len(column)))
 
 
+def _keys_from_index(index):
+    if type(index) is pd.MultiIndex and all((codes >= 0).all() for codes in index.codes):
+        levels = [tuple(level) for level in index.levels]
+        if all(type(label) in (int, str) for level in levels for label in level):
+            # Reuse exact immutable labels when pandas has no missing codes.
+            columns = (np.array(level, dtype=object)[codes].tolist()
+                       for level, codes in zip(levels, index.codes))
+            return list(zip(*columns))
+    return [_key(label) for label in index]
+
+
 def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=False,
           preserve_scalar_types=False):
     """Build an existing Table, optionally nested in explicit group Records.
@@ -121,7 +132,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
             and all(dtype == np.dtype('float64') for dtype in dtypes)):
         # ndarray.tolist returns the same built-in float scalars as
         # itertuples for native float64. Table still owns and validates keys.
-        result = Table([_key(label) for label in source_index],
+        result = Table(_keys_from_index(source_index),
                        selected_frame.to_numpy(copy=False).tolist(), selected, index_error)
         object.__setattr__(result, '_metadata', _axes_metadata(selected_frame, dtypes))
         return result
