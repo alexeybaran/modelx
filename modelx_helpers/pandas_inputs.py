@@ -321,7 +321,10 @@ def record(row, *, preserve_scalar_types=False):
     if preserve_scalar_types:
         # Series.items() can yield Python scalars while Series[key] returns a
         # numpy scalar. Preserve the actual public scalar-selection contract.
-        values = {key: row[key] for key in row.index}
+        if type(row) is pd.Series and all(type(key) is str for key in row.index):
+            values = dict(zip(row.index, _column_scalars(row)))
+        else:
+            values = {key: row[key] for key in row.index}
         result = Record(values, preserve_scalar_types=True)
     else:
         values = dict(row.items())
