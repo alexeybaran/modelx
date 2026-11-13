@@ -189,6 +189,23 @@ def _stored_row(table, position):
     return result
 
 
+class _TableAt:
+    """``table.at[key, column]``: the stored value, as ``table.loc[key, column]`` (pandas ``.at``)."""
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __getitem__(self, item):
+        if not (type(item) is tuple and len(item) == 2):
+            raise TypeError('Table.at supports at[key, "column"]')
+        key, column = item
+        if type(column) is not str or column not in self._table._columns:
+            raise KeyError(column)
+        return self._table.lookup(key, column)
+
+
 class Table(Mapping):
     __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
                              'owned-table-1', 'modelx_helpers.immutable_inputs.Table')
@@ -338,6 +355,11 @@ class Table(Mapping):
     def loc(self):
         """Pandas-spelled label reads; see :class:`_TableLoc`."""
         return _TableLoc(self)
+
+    @property
+    def at(self):
+        """Scalar label reads with pandas ``.at`` spelling: ``table.at[key, "col"]``."""
+        return _TableAt(self)
 
     def __getattr__(self, name):
         """Read-only pandas passthrough for anything outside the table vocabulary.
