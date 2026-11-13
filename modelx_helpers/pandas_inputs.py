@@ -403,6 +403,7 @@ table.__modelx_native_operation__ = 'table'
 table.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'table')
 table.__modelx_cython_call_layout__ = 'keywords'
 table.__modelx_cython_scalar_result__ = 'object'
+table.__modelx_cython_result_type__ = ('modelx_helpers.immutable_inputs.Table', 'groups')
 
 
 def group_record(tables):
