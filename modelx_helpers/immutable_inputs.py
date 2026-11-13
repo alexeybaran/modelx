@@ -166,10 +166,22 @@ class Table(Mapping):
         return table
 
     def __getattr__(self, name):
-        # Rectangular numeric tables own the axes and values without allocating
-        # their expanded Python representation until it is actually used.
+        """The one attribute fallback of a Table.
+
+        1. Rectangular and contiguous tables own their axes and values without
+           allocating the expanded Python representation (``_keys``, ``_values``,
+           ``_positions``, ``_ordered``) until legacy code asks for it.
+        2. Any other private name raises AttributeError.
+        3. A public name outside the table vocabulary (``iloc``, ``columns``,
+           ``shape``...) is read from a pandas DataFrame materialised once from the
+           table and handed out as a copy-on-write copy, so the table cannot change.
+           Materialising expands compact storage for good; a ``hasattr`` probe of a
+           public name does the same. Read the vocabulary instead.
+        """
         if name not in ('_keys', '_values', '_positions', '_ordered'):
-            raise AttributeError(name)
+            if name.startswith('_'):
+                raise AttributeError(name)
+            return getattr(_pandas_frame(self).copy(deep=False), name)
         from itertools import product
 
         cache = object.__getattribute__(self, '_native_cache')
@@ -213,6 +225,8 @@ class Table(Mapping):
             return self._values
         if key == 'columns':
             return self._columns
+        if type(key) is str and key in self._columns:
+            return _TableColumn(self, key)       # pandas spelling: frame["col"]
         raise KeyError(key)
 
     def __iter__(self):
@@ -360,6 +374,35 @@ class Table(Mapping):
         """The table's complete row keys in their original order."""
         return _TableIndex(self)
 
+    @property
+    def loc(self):
+        """Pandas-spelled label reads; see :class:`_TableLoc`."""
+        return _TableLoc(self)
+
+    @property
+    def at(self):
+        """Scalar label reads with pandas ``.at`` spelling: ``table.at[key, "col"]``."""
+        return _TableAt(self)
+
+    def iterrows(self):
+        """``(label, row)`` pairs in row order, like ``DataFrame.iterrows()`` without pandas.
+
+        Each row is the Record ``loc[label]`` returns: with ``rows=True`` the pandas-coerced
+        row, otherwise the stored values (no dtype coercion across columns). The pairs are
+        built once per table from its storage and shared; compact storage is read, not
+        expanded into the table's ``_keys``/``_values``.
+        """
+        rows = self._native_cache.get('iterrows')
+        if rows is None:
+            metadata = self._metadata
+            if metadata is not None and metadata[0] == 'frame' and metadata[4] is not None:
+                rows = tuple((key, self.slice(key)) for key in _iter_keys(self))
+            else:
+                rows = tuple((key, _row_record(self, position))
+                             for position, key in enumerate(_iter_keys(self)))
+            rows = self._native_cache.setdefault('iterrows', rows)
+        return iter(rows)
+
     def __reduce__(self):
         args = (self._keys, self._values, self._columns)
         if self._index_error is not None:
@@ -466,3 +509,635 @@ def _valid_index_key(key, spec):
         if mode == 2 and boolean:
             return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Target-syntax read vocabulary (round 3, W1.H): loc, at, T["c"], iterrows,
+# index.min/max/asof/searchsorted/[i], ``k in T.index``. Every read below goes
+# through _storage_of/_find_row, which read contiguous and rectangular storage
+# directly: they never set the lazy ``_keys``/``_values``/``_positions``/
+# ``_ordered`` of a compact table. The legacy methods above are unchanged.
+
+def _storage_of(table):
+    """('contiguous', start, data) | ('rectangular', axes, data, positions) | ('rows',)."""
+    cache = table._native_cache
+    contiguous = cache.get(_CONTIGUOUS_STORAGE)
+    if contiguous is not None:
+        return ('contiguous', contiguous[0], contiguous[1])
+    rectangular = cache.get(_RECTANGULAR_STORAGE)
+    if rectangular is not None:
+        return ('rectangular', *rectangular)
+    return _ROWS
+
+
+_ROWS = ('rows',)
+
+
+def _row_count(table):
+    storage = _storage_of(table)
+    if storage is _ROWS:
+        return len(table._keys)
+    return len(storage[2])
+
+
+def _levels(table):
+    """Number of key levels: 1 for scalar keys."""
+    spec = table._index_error
+    if spec is not None:
+        return len(spec['boolean_modes']) if spec['multi'] else 1
+    storage = _storage_of(table)
+    if storage[0] == 'rectangular':
+        return len(storage[1])
+    if storage[0] == 'contiguous':
+        return 1
+    keys = table._keys
+    return len(keys[0]) if keys and type(keys[0]) is tuple else 1
+
+
+def _iter_keys(table):
+    storage = _storage_of(table)
+    if storage[0] == 'rectangular':
+        from itertools import product
+        return product(*storage[1])
+    return iter(table._keys)       # contiguous tables own their key tuple
+
+
+class _ProductKeys:
+    """The rectangular row keys as a read-only sequence, computed per position."""
+
+    __slots__ = ('_axes', '_size')
+
+    def __init__(self, axes):
+        from math import prod
+        self._axes, self._size = axes, prod(len(axis) for axis in axes)
+
+    def __len__(self):
+        return self._size
+
+    def __getitem__(self, position):
+        parts = []
+        for axis in reversed(self._axes):
+            position, digit = divmod(position, len(axis))
+            parts.append(axis[digit])
+        return tuple(reversed(parts))
+
+
+def _key_sequence(table):
+    storage = _storage_of(table)
+    if storage[0] == 'rectangular':
+        return _ProductKeys(storage[1])
+    return table._keys
+
+
+def _integral(key):
+    """The int value of an integral key (int, IntEnum, integral float or numpy number), else None."""
+    kind = type(key)
+    if kind is int:
+        return key
+    if kind is bool:
+        return None
+    if kind is float:
+        return int(key) if key.is_integer() else None
+    if isinstance(key, int):           # IntEnum and other int subclasses
+        return int(key)
+    if kind.__module__ == 'numpy':
+        from numpy import integer, floating
+        if isinstance(key, (integer, floating)):
+            try:
+                number = int(key)
+            except (ValueError, OverflowError):
+                return None
+            if key == number and hash(key) == hash(number):
+                return number
+    return None
+
+
+def _find_row(table, key):
+    """Position of the complete key ``key``; KeyError(key) when it is not a row label.
+
+    Pandas label rules: the index spec's boolean modes, a float equal to an int
+    label matches, NaN matches a missing label of a general table.
+    """
+    spec = table._index_error
+    if spec is not None and not _valid_index_key(key, spec):
+        raise KeyError(key)
+    storage = _storage_of(table)
+    kind = storage[0]
+    if kind == 'contiguous':
+        _, start, data = storage
+        number = _integral(key)
+        if number is None:
+            if type(key) in (str, bytes, float, bool) or key is None or type(key).__module__ == 'numpy':
+                raise KeyError(key)
+            try:
+                return table._positions[key]       # exotic numbers: equality as a dict
+            except (KeyError, TypeError):
+                raise KeyError(key) from None
+        position = number - start
+        if 0 <= position < len(data):
+            return position
+        raise KeyError(key)
+    if kind == 'rectangular':
+        axes, positions = storage[1], storage[3]
+        if type(key) is not tuple or len(key) != len(axes):
+            raise KeyError(key)
+        position = 0
+        try:
+            for part, labels in zip(key, positions):
+                position = position * len(labels) + labels[part]
+        except (KeyError, TypeError):
+            raise KeyError(key) from None
+        return position
+    try:
+        if spec is None:
+            return table._positions[key]
+        return table._positions[_index_key(key, spec)]
+    except (KeyError, TypeError):
+        raise KeyError(key) from None
+
+
+def _row_values(table, position):
+    storage = _storage_of(table)
+    if storage[0] == 'contiguous':
+        row = storage[2][position]
+        return tuple(row) if table._preserve_scalar_types else tuple(row.tolist())
+    if storage[0] == 'rectangular':
+        return (float(storage[2][position]),)
+    return table._values[position]
+
+
+def _cell(table, position, column):
+    storage = _storage_of(table)
+    if storage[0] == 'contiguous':
+        value = storage[2][position, column]
+        return value if table._preserve_scalar_types else value.item()
+    if storage[0] == 'rectangular':
+        return float(storage[2][position])
+    return table._values[position][column]
+
+
+def _column_index(table, column):
+    """The column's position; KeyError(column) as pandas when it is not a column."""
+    try:
+        return table._columns.index(column) if type(column) is str else _no_column(column)
+    except ValueError:
+        raise KeyError(column) from None
+
+
+def _no_column(column):
+    raise KeyError(column)
+
+
+def _record(items):
+    result = object.__new__(Record)
+    object.__setattr__(result, '_items', items)
+    object.__setattr__(result, '_index', MappingProxyType(dict(items)))
+    object.__setattr__(result, '_native_groups', {})
+    object.__setattr__(result, '_metadata', None)
+    object.__setattr__(result, '_preserve_scalar_types', False)
+    return result
+
+
+def _row_record(table, position):
+    """The Record of a stored row: the table's own (already frozen) values."""
+    values = _row_values(table, position)
+    if table._preserve_scalar_types:
+        # Raw (possibly mutable) cells: Record construction freezes them.
+        return Record(dict(zip(table._columns, values)))
+    return _record(tuple(zip(table._columns, values)))
+
+
+def _pandas_frame(table):
+    """The DataFrame of the table, built once (expands compact storage); AttributeError if none."""
+    frame = table._native_cache.get('pandas_frame')
+    if frame is None:
+        from .table_operations import to_pandas
+        try:
+            frame = to_pandas(table)
+        except (TypeError, ValueError) as exc:   # hasattr()/getattr(..., default) expect AttributeError
+            raise AttributeError('pandas passthrough unavailable') from exc
+        frame = table._native_cache.setdefault('pandas_frame', frame)
+    return frame
+
+
+def _modes_admit(prefix, modes):
+    """False when a part breaks its level's pandas boolean label mode (1: bool only, 2: no bool)."""
+    for part, mode in zip(prefix, modes):
+        if mode and not _missing_index_part(part):
+            boolean = type(part) is bool or type(part).__name__ == 'bool_'
+            if boolean != (mode == 1):
+                return False
+    return True
+
+
+def _spec_modes(table):
+    spec = table._index_error
+    return spec['boolean_modes'] if spec is not None else ()
+
+
+def _child_spec(table, count, levels):
+    spec = table._index_error
+    if spec is None:
+        return None
+    modes = tuple(spec['boolean_modes'][count:])
+    values = dict(spec._index)
+    values.update(multi=levels - count > 1, boolean_modes=modes,
+                  row_bool_labels=levels - count == 1 and modes == (1,))
+    return Record(values)
+
+
+def _child_metadata(table, positions, count):
+    """Axes metadata of a child (a subset of the parent's pandas index), or None."""
+    metadata = table._metadata
+    if (metadata is None or metadata[0] not in ('axes', 'frame') or type(metadata[1]) is tuple
+            or (metadata[0] == 'axes' and len(metadata) > 4)):
+        return None
+    return ('axes', ('subset', metadata[1], positions, tuple(range(count))), metadata[2], metadata[3])
+
+
+def _prefix_groups(table, count):
+    """{prefix: positions} of a row-stored table, built in one pass and memoised."""
+    cache = table._native_cache
+    groups = cache.get(('prefix_rows', count))
+    if groups is None:
+        grouping = {}
+        spec = table._index_error
+        for position, key in enumerate(table._keys):
+            prefix = key[:count] if spec is None else _index_key(key, spec)[:count]
+            grouping.setdefault(prefix, []).append(position)
+        groups = cache.setdefault(('prefix_rows', count), grouping)
+    return groups
+
+
+def _prefix_block(table, prefix, storage):
+    """(start, size) of a rectangular prefix block; KeyError when a part is not an axis label."""
+    axes, positions = storage[1], storage[3]
+    offset = 0
+    for part, labels in zip(prefix, positions):
+        offset = offset * len(labels) + labels[part]
+    size = 1
+    for axis in axes[len(prefix):]:
+        size *= len(axis)
+    return offset * size, size
+
+
+def _has_prefix(table, prefix):
+    if not _modes_admit(prefix, _spec_modes(table)):
+        return False
+    storage = _storage_of(table)
+    try:
+        if storage[0] == 'rectangular':
+            _prefix_block(table, prefix, storage)
+            return True
+        spec = table._index_error
+        key = prefix if spec is None else _index_key(prefix, spec) if spec['multi'] else prefix
+        return key in _prefix_groups(table, len(prefix))
+    except (KeyError, TypeError):
+        return False
+
+
+def _sub_table(table, item, prefix, levels):
+    """``table.loc[prefix]`` on a multi-level table, as pandas: the matching rows with the
+    selected levels dropped (scalar keys when one level is left); KeyError(item) when none.
+
+    The child is a pure function of the immutable table and the prefix value, so it is
+    built once and shared (per-prefix memo in ``_native_cache``, set with ``setdefault``;
+    live and exported use only, never read by compiled code). A rectangular parent gives a
+    contiguous child (one int level left, consecutive ascending labels) or a rectangular
+    child (two or more levels left) over a slice of the same ndarray, otherwise a float-row
+    child built from that slice; a row-stored parent gives a row-stored child.
+    """
+    count = len(prefix)
+    modes = _spec_modes(table)
+    if not _modes_admit(prefix, modes):
+        raise KeyError(item)
+    cache = table._native_cache
+    entry = cache.get(('prefix_children', count))
+    if entry is None:
+        # (children by prefix value, the prefix levels' pandas boolean label modes)
+        entry = cache.setdefault(('prefix_children', count), ({}, tuple(modes[:count])))
+    children = entry[0]
+    try:
+        child = children.get(prefix)
+    except TypeError:
+        raise KeyError(item) from None
+    if child is not None:
+        return child
+    storage = _storage_of(table)
+    spec = _child_spec(table, count, levels)
+    if storage[0] == 'rectangular':
+        try:
+            start, size = _prefix_block(table, prefix, storage)
+        except (KeyError, TypeError):
+            raise KeyError(item) from None
+        rest, block = storage[1][count:], storage[2][start:start + size]
+        metadata = _child_metadata(table, range(start, start + size), count)
+        if len(rest) > 1:
+            child = Table._from_rectangular(rest, block, table._columns, spec, metadata)
+        else:
+            labels = rest[0]
+            if (all(type(label) is int for label in labels)
+                    and labels == tuple(range(labels[0], labels[0] + len(labels)))):
+                child = Table._from_contiguous(labels, block.reshape((-1, 1)), table._columns,
+                                               spec, metadata, False)
+            else:
+                child = Table._from_float64(labels, ((value,) for value in block.tolist()),
+                                            table._columns, spec, exact_keys=True)
+                object.__setattr__(child, '_metadata', metadata)
+    else:
+        key = prefix
+        if table._index_error is not None:
+            key = _index_key(prefix, table._index_error) if table._index_error['multi'] else prefix
+        try:
+            positions = _prefix_groups(table, count).get(key)
+        except TypeError:
+            positions = None
+        if positions is None:
+            raise KeyError(item)
+        keys, values = table._keys, table._values
+        child = Table.__new__(Table)
+        Table._initialize(child, tuple(keys[p][count:] if levels - count > 1 else keys[p][count]
+                                       for p in positions),
+                          tuple(values[p] for p in positions), table._columns, spec,
+                          table._preserve_scalar_types)
+        object.__setattr__(child, '_metadata', _child_metadata(table, tuple(positions), count))
+    return children.setdefault(prefix, child)
+
+
+class _TableLoc:
+    """Label reads with pandas spelling.
+
+    ``loc[key, "col"]`` the stored value; ``loc[key]`` the row as a Record (with
+    ``rows=True`` the pandas-coerced row); ``loc[prefix]`` on a multi-level table the
+    shared sub-table. A tuple key addresses a multi-level table. Errors follow pandas:
+    a missing column raises KeyError(column) before the key is looked at, a missing key
+    KeyError(key). One deliberate difference: a missing complete key in the row form
+    ``loc[(a, b)]`` raises KeyError((a, b)); pandas reads the tuple as (row, column) and
+    raises KeyError(b). Slices and lists raise TypeError.
+    """
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __getitem__(self, item):
+        table = self._table
+        if type(item) is tuple and len(item) == 2:
+            key, column = item
+            if type(column) is str and column in table._columns:
+                return _cell(table, _find_row(table, key), table._columns.index(column))
+            levels = _levels(table)
+            if levels == 1 or type(key) is tuple:
+                if type(column) is slice or type(key) is slice:
+                    raise TypeError('Table.loc supports loc[key, "column"], loc[key] and loc[prefix]')
+                raise KeyError(column)
+        prefix = item if type(item) is tuple else (item,)
+        entry = table._native_cache.get(('prefix_children', len(prefix)))
+        if entry is not None:
+            try:
+                child = entry[0].get(prefix)
+            except TypeError:
+                child = None
+            if child is not None and _modes_admit(prefix, entry[1]):
+                return child
+        if type(item) is slice or (type(item) is tuple and any(type(part) is slice for part in item)):
+            raise TypeError('Table.loc supports loc[key, "column"], loc[key] and loc[prefix], not slices')
+        if type(item) is list:
+            raise TypeError('Table.loc supports loc[key, "column"], loc[key] and loc[prefix], not lists')
+        levels = _levels(table)
+        if levels > 1:
+            if len(prefix) < levels:
+                return _sub_table(table, item, prefix, levels)
+            if len(prefix) > levels:
+                raise KeyError(item)
+        metadata = table._metadata
+        if metadata is not None and metadata[0] == 'frame' and metadata[4] is not None:
+            return table.slice(item)
+        return _row_record(table, _find_row(table, item))
+
+
+class _TableAt:
+    """``table.at[key, column]``: the stored value, as ``table.loc[key, column]`` (pandas ``.at``)."""
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __getitem__(self, item):
+        if not (type(item) is tuple and len(item) == 2):
+            raise TypeError('Table.at supports at[key, "column"]')
+        key, column = item
+        table = self._table
+        return _cell(table, _find_row(table, key), _column_index(table, column))
+
+
+class _TableColumn(Mapping):
+    """``table["col"]``: one column as a label -> value mapping, read like a pandas Series.
+
+    ``column[label]`` and ``label in column`` select by row label (KeyError(label));
+    ``column.index`` is the table's index; iteration yields the values in row order.
+    """
+
+    __slots__ = ('_table', '_column', '_position')
+
+    def __init__(self, table, column):
+        self._table, self._column = table, column
+        self._position = table._columns.index(column)
+
+    def __getitem__(self, label):
+        return _cell(self._table, _find_row(self._table, label), self._position)
+
+    def __contains__(self, label):
+        return label in self._table.index
+
+    def __iter__(self):
+        table = self._table
+        storage = _storage_of(table)
+        if storage[0] == 'contiguous':
+            values = storage[2][:, self._position]
+            return iter(tuple(values) if table._preserve_scalar_types else values.tolist())
+        if storage[0] == 'rectangular':
+            return iter(storage[2].tolist())
+        position = self._position
+        return iter(tuple(values[position] for values in table._values))
+
+    def __len__(self):
+        return _row_count(self._table)
+
+    @property
+    def index(self):
+        return self._table.index
+
+
+def _index_position(index, size):
+    """``index[i]`` position as pandas: negative counts from the end; IndexError past the end."""
+    from operator import index as as_index
+    position = as_index(index)
+    if position < 0:
+        position += size
+    if not 0 <= position < size:
+        raise IndexError(f'index {as_index(index)} is out of bounds for axis 0 with size {size}')
+    return position
+
+
+def _below_first(label):
+    # D25a: one behaviour in live, exported and compiled code (pandas returns NaN).
+    raise KeyError(label)
+
+
+def _asof(self, label):
+    """See :meth:`_TableIndex.asof`."""
+    table = self._table
+    storage = _storage_of(table)
+    if storage[0] == 'contiguous':
+        keys = table._keys
+        if type(label) is int:
+            if label >= keys[-1]:
+                return keys[-1]
+            if label < keys[0]:
+                _below_first(label)
+            return keys[label - keys[0]]
+        position = bisect_right(keys, label) - 1
+        if position < 0:
+            _below_first(label)
+        return keys[position]
+    if storage[0] == 'rows':
+        increasing = table._native_cache.get('asof_increasing')
+        if increasing is None:
+            keys = table._keys
+            increasing = table._native_cache.setdefault('asof_increasing', bool(
+                keys and table._ordered is not None and keys == table._ordered
+                and not any(type(key) is tuple for key in keys)))
+        if increasing:
+            keys = table._keys
+            position = bisect_right(keys, label) - 1
+            if position < 0:
+                _below_first(label)
+            return keys[position]
+    result = self._pandas_index().asof(label)
+    if type(result) is float and result != result:
+        _below_first(label)
+    return result
+
+
+class _TableIndex:
+    """Read-only view of the table's complete row keys in input order.
+
+    The pandas ``Index`` vocabulary of the target syntax runs on the table's own storage:
+    ``k in index`` (a partial key of a multi-level table is contained when some row starts
+    with it, as pandas), ``len``, iteration, ``min()``, ``max()``, ``asof(k)``,
+    ``searchsorted(k, side=...)`` and ``index[i]``. Any other public attribute is read from
+    the pandas index of the materialised DataFrame (expands compact storage).
+    """
+
+    __slots__ = ('_table',)
+
+    def __init__(self, table):
+        self._table = table
+
+    def __contains__(self, key):
+        table = self._table
+        levels = _levels(table)
+        if levels > 1:
+            prefix = key if type(key) is tuple else (key,)
+            if 0 < len(prefix) < levels:
+                return _has_prefix(table, prefix)
+        try:
+            _find_row(table, key)
+        except KeyError:
+            return False
+        return True
+
+    def __iter__(self):
+        return _iter_keys(self._table)
+
+    def __len__(self):
+        return _row_count(self._table)
+
+    def __getitem__(self, i):
+        """``index[i]``: the i-th label in row order; negative i counts from the end."""
+        if type(i) is bool or not hasattr(type(i), '__index__'):
+            return self._pandas_index()[i]
+        table = self._table
+        size = _row_count(table)
+        position = _index_position(i, size)
+        storage = _storage_of(table)
+        if storage[0] == 'contiguous':
+            return storage[1] + position
+        return _key_sequence(table)[position]
+
+    def _pandas_index(self):
+        return _pandas_frame(self._table).index
+
+    def max_int(self) -> int:
+        return int(self.max())
+
+    def max_float(self) -> float:
+        return float(self.max())
+
+    def _extreme(self, last, args, kwargs):
+        if args or kwargs:
+            index = self._pandas_index()
+            return (index.max if last else index.min)(*args, **kwargs)
+        table = self._table
+        storage = _storage_of(table)
+        if storage[0] == 'contiguous':
+            keys = table._keys
+            return keys[-1] if last else keys[0]
+        if storage[0] == 'rectangular':
+            # a full product: the lexicographic extreme is the tuple of per-axis extremes
+            pick = max if last else min
+            return tuple(pick(axis) for axis in storage[1])
+        keys = table._keys
+        if not keys:
+            return float('nan')
+        ordered = table._ordered
+        if ordered is not None:
+            return ordered[-1] if last else ordered[0]
+        return max(keys) if last else min(keys)
+
+    def max(self, *args, **kwargs):
+        """The largest row key, as ``pandas.Index.max`` (a Python scalar)."""
+        return self._extreme(True, args, kwargs)
+
+    def min(self, *args, **kwargs):
+        """The smallest row key, as ``pandas.Index.min`` (a Python scalar)."""
+        return self._extreme(False, args, kwargs)
+
+    def asof(self, label):
+        """The last label <= ``label``, as ``pandas.Index.asof``, except below the first label.
+
+        Below the first label this raises ``KeyError(label)`` where pandas returns NaN
+        (decision D25a): live, exported and compiled code then agree, and an integer
+        key never turns into a float. Scalar labels stored in increasing order are
+        searched directly; any other index (tuple labels, labels not in increasing
+        order) runs the pandas method on the materialised index, with its errors.
+        """
+        return _asof(self, label)
+
+    def searchsorted(self, value, side='left', sorter=None):
+        """Insertion position of ``value`` in the (sorted) labels, as ``pandas.Index.searchsorted``.
+
+        A Python int. Successor read: ``sub.index[sub.index.searchsorted(x, side="right")]``.
+        Array values and ``sorter`` run the pandas method.
+        """
+        if side not in ('left', 'right'):
+            raise ValueError(f"side must be 'left' or 'right', got {side!r}")
+        if sorter is not None or type(value) is list or type(value).__name__ == 'ndarray':
+            return self._pandas_index().searchsorted(value, side=side, sorter=sorter)
+        from bisect import bisect_left
+        table = self._table
+        storage = _storage_of(table)
+        if storage[0] == 'contiguous' and type(value) is int:
+            start, size = storage[1], len(storage[2])
+            return min(max(value - start + (side == 'right'), 0), size)
+        keys = _key_sequence(table)
+        return (bisect_right if side == 'right' else bisect_left)(keys, value)
+
+    def __getattr__(self, name):
+        """Read-only pandas passthrough to the materialised index."""
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self._pandas_index(), name)
