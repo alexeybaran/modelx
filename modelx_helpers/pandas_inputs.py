@@ -112,6 +112,25 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         raise ValueError('table columns must be nonempty strings')
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
+    source_index = frame.index
+    if (type(frame) is pd.DataFrame and type(source_index) is pd.MultiIndex
+            and type(groups) is tuple and not groups
+            and rows is False and report is False and preserve_scalar_types is False
+            and len(selected) == 1 and type(frame.columns) is pd.Index
+            and frame.columns.dtype.kind in 'OU'):
+        # A lookup-only single column needs the Series data and original axes.
+        # Taking the column axis preserves its dtype, name, and label order.
+        offset = frame.columns.get_indexer(selected)[0]
+        if offset >= 0:
+            series = frame[selected[0]]
+            dtype = series.dtype
+            if dtype == np.dtype('float64'):
+                keys, exact_keys = _keys_from_index(source_index)
+                values = ((scalar,) for scalar in series.to_numpy(copy=False).tolist())
+                result = Table._from_float64(keys, values, selected, index_error, exact_keys=exact_keys)
+                object.__setattr__(result, '_metadata', ('axes', source_index.copy(deep=True),
+                                                         frame.columns.take([offset]), (dtype,)))
+                return result
     if type(frame) is pd.DataFrame and tuple(frame.columns) == tuple(selected):
         selected_frame = frame
     else:
@@ -120,7 +139,6 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     object_columns = tuple(i for i, dtype in enumerate(dtypes)
                            if getattr(dtype, 'kind', None) == 'O'
                            and not isinstance(dtype, pd.StringDtype))
-    source_index = frame.index
     multi_index = isinstance(source_index, pd.MultiIndex)
     names = list(source_index.names)
     groups = tuple(groups)
