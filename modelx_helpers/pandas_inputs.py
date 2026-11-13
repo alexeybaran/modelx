@@ -268,11 +268,17 @@ def _rectangular_axes(index):
     strides = [1]
     for size in reversed(shape[1:]):
         strides.append(strides[-1] * size)
-    for size, stride, codes in zip(shape, reversed(strides), index.codes):
-        digits = np.arange(size, dtype=codes.dtype).reshape((1, size, 1))
-        if not np.all(codes.reshape((-1, size, stride)) == digits):
+    ordered = []
+    for labels, size, stride, codes in zip(axes, shape, reversed(strides), index.codes):
+        blocks = codes.reshape((-1, size, stride))
+        digits = blocks[0, :, 0]
+        if not np.all(blocks == digits.reshape((1, size, 1))):
             return None
-    return axes
+        original = tuple(int(digit) for digit in digits)
+        if min(original) < 0 or len(set(original)) != size:
+            return None
+        ordered.append(tuple(labels[digit] for digit in original))
+    return tuple(ordered)
 
 
 def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report):

@@ -227,3 +227,15 @@ def test_lookup_only_float64_preparation_owns_scalars_and_keys():
     assert type(scalar_preserving.lookup(("A", 2), "rate")) is np.float64
     assert scalar_preserving.lookup(("A", 2), "rate") == 0.0
     assert list(owned.index) == [("A", 2), ("A", 1), ("B", 3)]
+def test_rectangular_axes_keep_source_order():
+    from modelx_helpers.immutable_inputs import _RECTANGULAR_STORAGE
+
+    index = pd.MultiIndex.from_product([['M', 'F'], [2, 1]], names=['group', 'age'])
+    frame = pd.DataFrame({'value': [1.0, 2.0, 3.0, 4.0]}, index=index)
+    from modelx_helpers import pdn
+
+    result = pdn.table(frame, columns=('value',))
+    axes, _ = result._native_cache[_RECTANGULAR_STORAGE]
+    assert axes == (('M', 'F'), (2, 1))
+    assert result.lookup_float(('F', 2), 'value') == 3.0
+    pd.testing.assert_frame_equal(pdn.to_pandas(result), frame)
