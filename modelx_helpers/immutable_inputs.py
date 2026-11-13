@@ -519,39 +519,52 @@ def _valid_index_key(key, spec):
 # ``_ordered`` of a compact table. The legacy methods above are unchanged.
 
 def _storage_of(table):
-    """('contiguous', start, data) | ('rectangular', axes, data, positions) | ('rows',)."""
+    """The table's storage form, fixed at construction and kept in ``_native_cache``:
+    ``('contiguous', start, data, plain, levels)``,
+    ``('rectangular', axes, data, positions, plain, levels)`` or ``('rows', plain, levels)``.
+    ``plain``: an int or str key needs no pandas label-mode check (no bool-only level).
+    """
     cache = table._native_cache
-    contiguous = cache.get(_CONTIGUOUS_STORAGE)
-    if contiguous is not None:
-        return ('contiguous', contiguous[0], contiguous[1])
-    rectangular = cache.get(_RECTANGULAR_STORAGE)
-    if rectangular is not None:
-        return ('rectangular', *rectangular)
-    return _ROWS
+    form = cache.get(_STORAGE_FORM)
+    if form is None:
+        contiguous = cache.get(_CONTIGUOUS_STORAGE)
+        rectangular = cache.get(_RECTANGULAR_STORAGE)
+        spec = table._index_error
+        if spec is not None:
+            levels = len(spec['boolean_modes']) if spec['multi'] else 1
+            plain = not spec['multi'] and spec['boolean_modes'][0] != 1
+        else:
+            plain = True
+            if contiguous is not None:
+                levels = 1
+            elif rectangular is not None:
+                levels = len(rectangular[0])
+            else:
+                keys = table._keys
+                levels = len(keys[0]) if keys and type(keys[0]) is tuple else 1
+        if contiguous is not None:
+            form = ('contiguous', contiguous[0], contiguous[1], plain, levels)
+        elif rectangular is not None:
+            form = ('rectangular', *rectangular, plain, levels)
+        else:
+            form = ('rows', plain, levels)
+        form = cache.setdefault(_STORAGE_FORM, form)
+    return form
 
 
-_ROWS = ('rows',)
+_STORAGE_FORM = object()
 
 
 def _row_count(table):
     storage = _storage_of(table)
-    if storage is _ROWS:
+    if storage[0] == 'rows':
         return len(table._keys)
     return len(storage[2])
 
 
 def _levels(table):
     """Number of key levels: 1 for scalar keys."""
-    spec = table._index_error
-    if spec is not None:
-        return len(spec['boolean_modes']) if spec['multi'] else 1
-    storage = _storage_of(table)
-    if storage[0] == 'rectangular':
-        return len(storage[1])
-    if storage[0] == 'contiguous':
-        return 1
-    keys = table._keys
-    return len(keys[0]) if keys and type(keys[0]) is tuple else 1
+    return _storage_of(table)[-1]
 
 
 def _iter_keys(table):
@@ -612,48 +625,51 @@ def _integral(key):
     return None
 
 
-def _find_row(table, key):
+def _find_row(table, key, storage=None):
     """Position of the complete key ``key``; KeyError(key) when it is not a row label.
 
     Pandas label rules: the index spec's boolean modes, a float equal to an int
     label matches, NaN matches a missing label of a general table.
     """
-    spec = table._index_error
-    if spec is not None and not _valid_index_key(key, spec):
-        raise KeyError(key)
-    storage = _storage_of(table)
+    if storage is None:
+        storage = _storage_of(table)
     kind = storage[0]
+    key_type = type(key)
+    if not (storage[-2] and (key_type is int or key_type is str)):
+        spec = table._index_error
+        if spec is not None and not _valid_index_key(key, spec):
+            raise KeyError(key)
+    if kind == 'rows':
+        spec = table._index_error
+        try:
+            if spec is None or key_type is int or key_type is str:
+                return table._positions[key]
+            return table._positions[_index_key(key, spec)]
+        except (KeyError, TypeError):
+            raise KeyError(key) from None
     if kind == 'contiguous':
-        _, start, data = storage
-        number = _integral(key)
+        number = key if key_type is int else _integral(key)
         if number is None:
-            if type(key) in (str, bytes, float, bool) or key is None or type(key).__module__ == 'numpy':
+            if key_type in (str, bytes, float, bool) or key is None or key_type.__module__ == 'numpy':
                 raise KeyError(key)
             try:
                 return table._positions[key]       # exotic numbers: equality as a dict
             except (KeyError, TypeError):
                 raise KeyError(key) from None
-        position = number - start
-        if 0 <= position < len(data):
+        position = number - storage[1]
+        if 0 <= position < len(storage[2]):
             return position
         raise KeyError(key)
-    if kind == 'rectangular':
-        axes, positions = storage[1], storage[3]
-        if type(key) is not tuple or len(key) != len(axes):
-            raise KeyError(key)
-        position = 0
-        try:
-            for part, labels in zip(key, positions):
-                position = position * len(labels) + labels[part]
-        except (KeyError, TypeError):
-            raise KeyError(key) from None
-        return position
+    axes, positions = storage[1], storage[3]
+    if key_type is not tuple or len(key) != len(axes):
+        raise KeyError(key)
+    position = 0
     try:
-        if spec is None:
-            return table._positions[key]
-        return table._positions[_index_key(key, spec)]
+        for part, labels in zip(key, positions):
+            position = position * len(labels) + labels[part]
     except (KeyError, TypeError):
         raise KeyError(key) from None
+    return position
 
 
 def _row_values(table, position):
@@ -666,14 +682,17 @@ def _row_values(table, position):
     return table._values[position]
 
 
-def _cell(table, position, column):
-    storage = _storage_of(table)
-    if storage[0] == 'contiguous':
-        value = storage[2][position, column]
-        return value if table._preserve_scalar_types else value.item()
-    if storage[0] == 'rectangular':
-        return float(storage[2][position])
-    return table._values[position][column]
+def _cell(table, position, column, storage=None):
+    if storage is None:
+        storage = _storage_of(table)
+    kind = storage[0]
+    if kind == 'rows':
+        return table._values[position][column]
+    if kind == 'contiguous':
+        if table._preserve_scalar_types:
+            return storage[2][position, column]
+        return storage[2].item(position, column)
+    return storage[2].item(position)
 
 
 def _column_index(table, column):
@@ -723,9 +742,9 @@ def _pandas_frame(table):
 def _modes_admit(prefix, modes):
     """False when a part breaks its level's pandas boolean label mode (1: bool only, 2: no bool)."""
     for part, mode in zip(prefix, modes):
-        if mode and not _missing_index_part(part):
+        if mode:
             boolean = type(part) is bool or type(part).__name__ == 'bool_'
-            if boolean != (mode == 1):
+            if boolean != (mode == 1) and not _missing_index_part(part):
                 return False
     return True
 
@@ -886,7 +905,8 @@ class _TableLoc:
         if type(item) is tuple and len(item) == 2:
             key, column = item
             if type(column) is str and column in table._columns:
-                return _cell(table, _find_row(table, key), table._columns.index(column))
+                storage = _storage_of(table)
+                return _cell(table, _find_row(table, key, storage), table._columns.index(column), storage)
             levels = _levels(table)
             if levels == 1 or type(key) is tuple:
                 if type(column) is slice or type(key) is slice:
@@ -930,7 +950,8 @@ class _TableAt:
             raise TypeError('Table.at supports at[key, "column"]')
         key, column = item
         table = self._table
-        return _cell(table, _find_row(table, key), _column_index(table, column))
+        column = _column_index(table, column)       # pandas: the column error first
+        return _cell(table, _find_row(table, key), column)
 
 
 class _TableColumn(Mapping):
