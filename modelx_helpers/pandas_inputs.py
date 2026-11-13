@@ -114,6 +114,23 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         raise ValueError('table columns must be unique')
     source_index = frame.index
     if (type(frame) is pd.DataFrame and type(source_index) is pd.MultiIndex
+            and type(groups) is tuple and len(groups) == 1
+            and source_index.nlevels == 2 and source_index.names.count(groups[0]) == 1
+            and rows is False and preserve_scalar_types is True
+            and type(frame.columns) is pd.Index and frame.columns.dtype.kind in 'OU'
+            and all((codes >= 0).all() for codes in source_index.codes)):
+        offsets = frame.columns.get_indexer(selected)
+        if (offsets >= 0).all():
+            series = tuple(frame[name] for name in selected)
+            dtypes = tuple(column.dtype for column in series)
+            if all(isinstance(dtype, np.dtype) and dtype.kind in 'biuf' for dtype in dtypes):
+                levels = [tuple(level) for level in source_index.levels]
+                if all(type(label) in (int, str) for level in levels for label in level):
+                    columns_axis = frame.columns.take(offsets)
+                    values = tuple(zip(*(column.to_numpy(copy=False) for column in series)))
+                    return _single_group_table(frame, selected, source_index.names.index(groups[0]),
+                                               levels, dtypes, True, report, columns_axis, values)
+    if (type(frame) is pd.DataFrame and type(source_index) is pd.MultiIndex
             and type(groups) is tuple and not groups
             and rows is False and report is False and preserve_scalar_types is False
             and len(selected) == 1 and type(frame.columns) is pd.Index
@@ -250,7 +267,8 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     return build(root, 0)[0]
 
 
-def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report):
+def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report,
+                        columns_axis=None, values=None):
     """Prepare exact grouped labels without materializing each MultiIndex row."""
     codes = frame.index.codes
     leaf_axis = 1 - group_axis
@@ -258,12 +276,15 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
     for position, (group, key) in enumerate(zip(codes[group_axis].tolist(), codes[leaf_axis].tolist())):
         key = levels[leaf_axis][key]
         grouped.setdefault(levels[group_axis][group], []).append((position, key))
-    axes = _axes_metadata(frame, dtypes)
+    if columns_axis is None:
+        columns_axis = frame.columns.copy(deep=True)
+    axes = ('axes', frame.index.copy(deep=True), columns_axis, dtypes)
     leaf_spec = _pandas_index_spec(frame.index.levels[leaf_axis]) if report else None
-    if preserve_scalar_types:
-        values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
-    else:
-        values = frame.to_numpy(copy=False).tolist()
+    if values is None:
+        if preserve_scalar_types:
+            values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
+        else:
+            values = frame.to_numpy(copy=False).tolist()
     tables = {}
     positions = []
     for group, entries in grouped.items():
@@ -277,7 +298,7 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
         if report:
             metadata = ('frame', index, *axes[2:], None, (), deepcopy(frame.attrs),
                         frame.flags.allows_duplicate_labels, (),
-                        (frame.columns.dtype, frame.columns.name), None)
+                        (columns_axis.dtype, columns_axis.name), None)
         else:
             metadata = ('axes', index, *axes[2:])
         object.__setattr__(table, '_metadata', metadata)
