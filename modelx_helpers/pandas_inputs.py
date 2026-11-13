@@ -113,7 +113,9 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
     source_index = frame.index
-    if (type(frame) is pd.DataFrame and type(source_index) is pd.MultiIndex
+    if (type(frame) is pd.DataFrame
+            and (type(source_index) is pd.MultiIndex or type(source_index) in (pd.Index, pd.RangeIndex)
+                 and source_index.dtype == np.dtype('int64'))
             and type(groups) is tuple and not groups
             and rows is False and report is False and preserve_scalar_types is False
             and len(selected) == 1 and type(frame.columns) is pd.Index
@@ -126,16 +128,24 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
             dtype = series.dtype
             if dtype == np.dtype('float64'):
                 metadata = ('axes', source_index.copy(deep=True), frame.columns.take([offset]), (dtype,))
-                axes = _rectangular_axes(source_index)
-                if axes is not None:
-                    data = series.to_numpy(copy=True)
-                    data.setflags(write=False)
-                    return Table._from_rectangular(axes, data, tuple(selected), index_error, metadata)
-                keys, exact_keys = _keys_from_index(source_index)
-                values = ((scalar,) for scalar in series.to_numpy(copy=False).tolist())
-                result = Table._from_float64(keys, values, selected, index_error, exact_keys=exact_keys)
-                object.__setattr__(result, '_metadata', metadata)
-                return result
+                if type(source_index) is pd.MultiIndex:
+                    axes = _rectangular_axes(source_index)
+                    if axes is not None:
+                        data = series.to_numpy(copy=True)
+                        data.setflags(write=False)
+                        return Table._from_rectangular(axes, data, tuple(selected), index_error, metadata)
+                elif len(source_index) and source_index.dtype == np.dtype('int64'):
+                    keys = tuple(source_index)
+                    if keys == tuple(range(keys[0], keys[0] + len(keys))):
+                        data = series.to_numpy(copy=True).reshape((-1, 1))
+                        data.setflags(write=False)
+                        return Table._from_contiguous(keys, data, tuple(selected), index_error, metadata, False)
+                if type(source_index) is pd.MultiIndex:
+                    keys, exact_keys = _keys_from_index(source_index)
+                    values = ((scalar,) for scalar in series.to_numpy(copy=False).tolist())
+                    result = Table._from_float64(keys, values, selected, index_error, exact_keys=exact_keys)
+                    object.__setattr__(result, '_metadata', metadata)
+                    return result
     if type(frame) is pd.DataFrame and tuple(frame.columns) == tuple(selected):
         selected_frame = frame
     else:
