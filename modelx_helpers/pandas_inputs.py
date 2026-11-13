@@ -133,7 +133,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                            if i not in grouped_positions]
     if groups and not remaining_positions:
         raise ValueError('grouping must leave at least one leaf key level')
-    if (type(frame) is pd.DataFrame and len(groups) == 1 and not (rows or report)
+    if (type(frame) is pd.DataFrame and len(groups) == 1 and not rows
             and multi_index and source_index.nlevels == 2
             and (all(dtype == np.dtype('float64') for dtype in dtypes)
                  or preserve_scalar_types and all(isinstance(dtype, np.dtype) and dtype.kind in 'biuf'
@@ -142,7 +142,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         labels = [tuple(level) for level in source_index.levels]
         if all(type(label) in (int, str) for level in labels for label in level):
             return _single_group_table(selected_frame, selected, grouped_positions[0],
-                                       labels, dtypes, preserve_scalar_types)
+                                       labels, dtypes, preserve_scalar_types, report)
     if (type(frame) is pd.DataFrame and not (groups or rows or report or preserve_scalar_types)
             and all(dtype == np.dtype('float64') for dtype in dtypes)):
         # ndarray.tolist returns the same built-in float scalars as
@@ -232,7 +232,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     return build(root, 0)[0]
 
 
-def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types):
+def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report):
     """Prepare exact grouped labels without materializing each MultiIndex row."""
     codes = frame.index.codes
     leaf_axis = 1 - group_axis
@@ -241,6 +241,7 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
         key = levels[leaf_axis][key]
         grouped.setdefault(levels[group_axis][group], []).append((position, key))
     axes = _axes_metadata(frame, dtypes)
+    leaf_spec = _pandas_index_spec(frame.index.levels[leaf_axis]) if report else None
     if preserve_scalar_types:
         values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
     else:
@@ -251,11 +252,17 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
         offsets, keys = zip(*entries)
         rows = (values[i] for i in offsets)
         if preserve_scalar_types:
-            table = Table(keys, rows, columns, preserve_scalar_types=True)
+            table = Table(keys, rows, columns, leaf_spec, preserve_scalar_types=True)
         else:
-            table = Table._from_float64(keys, rows, columns, None, exact_keys=True)
+            table = Table._from_float64(keys, rows, columns, leaf_spec, exact_keys=True)
         index = ('subset', axes[1], offsets, (group_axis,))
-        object.__setattr__(table, '_metadata', ('axes', index, *axes[2:]))
+        if report:
+            metadata = ('frame', index, *axes[2:], None, (), deepcopy(frame.attrs),
+                        frame.flags.allows_duplicate_labels, (),
+                        (frame.columns.dtype, frame.columns.name), None)
+        else:
+            metadata = ('axes', index, *axes[2:])
+        object.__setattr__(table, '_metadata', metadata)
         tables[group] = table
         positions.extend(offsets)
     result = Record(tables)

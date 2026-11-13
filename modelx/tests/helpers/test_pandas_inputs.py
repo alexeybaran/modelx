@@ -169,6 +169,27 @@ def test_grouped_leaf_keeps_lookup_policy_when_owning_pandas_axes(options):
         assert h.contains(leaf, key) is (not options)
 
 
+@pytest.mark.parametrize('preserve_scalar_types', [False, True])
+def test_grouped_lookup_reports_keep_leaf_metadata(preserve_scalar_types):
+    index = pd.MultiIndex.from_tuples(
+        [(4, 'A'), (1, 'B'), (2, 'A')], names=['year', 'group'])
+    frame = pd.DataFrame({'rate': [0.4, 0.1, 0.2]}, index=index)
+    frame.attrs['inputs'] = ['rates']
+    frame.flags.allows_duplicate_labels = False
+    groups = inputs.table(frame, groups=('group',), report=True,
+                          preserve_scalar_types=preserve_scalar_types)
+    leaf = groups['A']
+    expected = frame.xs('A', level='group')
+    frame.attrs['inputs'].append('changed')
+    pd.testing.assert_frame_equal(to_pandas(leaf), expected, check_exact=True)
+    series = to_pandas(column(leaf, 'rate', report=True))
+    pd.testing.assert_series_equal(series, expected['rate'], check_exact=True)
+    assert series.attrs == {'inputs': ['rates']}
+    assert not series.flags.allows_duplicate_labels
+    with pytest.raises(ValueError, match='rows=True'):
+        row(leaf, 4)
+
+
 def test_frozen_pandas_object_cells_restore_original_container_values():
     data = {'rates': [0.5, (1.0,)]}
     frame = pd.DataFrame({'inputs': [data, ('annuity', [2.0])]},
