@@ -12,6 +12,7 @@ from types import MappingProxyType
 
 _MISSING = object()
 _RECTANGULAR_STORAGE = object()
+_CONTIGUOUS_STORAGE = object()
 
 
 class Record(Mapping):
@@ -151,6 +152,18 @@ class Table(Mapping):
         object.__setattr__(table, '_preserve_scalar_types', False)
         return table
 
+    @classmethod
+    def _from_contiguous(cls, keys, data, columns, index_error, metadata, preserve_scalar_types):
+        table = cls.__new__(cls)
+        object.__setattr__(table, '_keys', keys)
+        object.__setattr__(table, '_ordered', keys)
+        object.__setattr__(table, '_columns', columns)
+        object.__setattr__(table, '_native_cache', {_CONTIGUOUS_STORAGE: (keys[0], data)})
+        object.__setattr__(table, '_index_error', index_error)
+        object.__setattr__(table, '_metadata', metadata)
+        object.__setattr__(table, '_preserve_scalar_types', preserve_scalar_types)
+        return table
+
     def __getattr__(self, name):
         # Rectangular numeric tables own the axes and values without allocating
         # their expanded Python representation until it is actually used.
@@ -161,7 +174,19 @@ class Table(Mapping):
         cache = object.__getattribute__(self, '_native_cache')
         storage = cache.get(_RECTANGULAR_STORAGE)
         if storage is None:
-            raise AttributeError(name)
+            contiguous = cache.get(_CONTIGUOUS_STORAGE)
+            if contiguous is None:
+                raise AttributeError(name)
+            _, data = contiguous
+            if name == '_values':
+                result = (tuple(zip(*data.T)) if self._preserve_scalar_types else
+                          tuple(map(tuple, data.tolist())))
+            elif name == '_positions':
+                result = MappingProxyType(dict(zip(self._keys, range(len(data)))))
+            else:
+                raise AttributeError(name)
+            object.__setattr__(self, name, result)
+            return result
         axes, data = storage
         if name == '_keys':
             result = tuple(product(*axes))
