@@ -405,6 +405,14 @@ table.__modelx_cython_call_layout__ = 'keywords'
 table.__modelx_cython_scalar_result__ = 'object'
 
 
+def group_record(tables):
+    """Own a mapping of already prepared tables, retaining the supplied group keys."""
+    return Record(tables)
+
+
+group_record.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'group_record')
+
+
 def select_row(frame, key):
     """Select a public pandas row at the owning Cell's input boundary.
 
