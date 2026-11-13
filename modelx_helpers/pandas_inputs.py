@@ -52,6 +52,25 @@ def _record_metadata(result, metadata, values):
     object.__setattr__(result, '_metadata', metadata)
 
 
+def _column_scalars(column):
+    if isinstance(column.dtype, np.dtype) and column.dtype.kind in 'biuf':
+        return iter(column.to_numpy(copy=False))
+    return (column.iloc[position] for position in range(len(column)))
+
+
+def _keys_from_index(index):
+    if type(index) is pd.MultiIndex and all((codes >= 0).all() for codes in index.codes):
+        levels = [tuple(level) for level in index.levels]
+        if all(type(label) in (int, str) for level in levels for label in level):
+            # Reuse exact immutable labels when pandas has no missing codes.
+            columns = (np.array(level, dtype=object)[codes].tolist()
+                       for level, codes in zip(levels, index.codes))
+            return list(zip(*columns)), True
+    if type(index) in (pd.Index, pd.RangeIndex) and isinstance(index.dtype, np.dtype) and index.dtype.kind in 'iu':
+        return list(index), True
+    return [_key(label) for label in index], False
+
+
 def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=False,
           preserve_scalar_types=False):
     """Build an existing Table, optionally nested in explicit group Records.
@@ -93,7 +112,10 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         raise ValueError('table columns must be nonempty strings')
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
-    selected_frame = frame if columns is None and type(frame) is pd.DataFrame else frame.loc[:, selected]
+    if type(frame) is pd.DataFrame and tuple(frame.columns) == tuple(selected):
+        selected_frame = frame
+    else:
+        selected_frame = frame.loc[:, selected]
     dtypes = tuple(selected_frame.dtypes)
     object_columns = tuple(i for i, dtype in enumerate(dtypes)
                            if getattr(dtype, 'kind', None) == 'O'
@@ -111,13 +133,30 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                            if i not in grouped_positions]
     if groups and not remaining_positions:
         raise ValueError('grouping must leave at least one leaf key level')
+    if (type(frame) is pd.DataFrame and len(groups) == 1 and not rows
+            and multi_index and source_index.nlevels == 2
+            and (all(dtype == np.dtype('float64') for dtype in dtypes)
+                 or preserve_scalar_types and all(isinstance(dtype, np.dtype) and dtype.kind in 'biuf'
+                                                  for dtype in dtypes))
+            and all((codes >= 0).all() for codes in source_index.codes)):
+        labels = [tuple(level) for level in source_index.levels]
+        if all(type(label) in (int, str) for level in labels for label in level):
+            return _single_group_table(selected_frame, selected, grouped_positions[0],
+                                       labels, dtypes, preserve_scalar_types, report)
+    if (type(frame) is pd.DataFrame and not (groups or rows or report or preserve_scalar_types)
+            and all(dtype == np.dtype('float64') for dtype in dtypes)):
+        # ndarray.tolist returns the same built-in float scalars as
+        # itertuples for native float64. Table still owns and validates keys.
+        keys, exact_keys = _keys_from_index(source_index)
+        result = Table._from_float64(keys, selected_frame.to_numpy(copy=False).tolist(),
+                                     selected, index_error, exact_keys=exact_keys)
+        object.__setattr__(result, '_metadata', _axes_metadata(selected_frame, dtypes))
+        return result
     root = OrderedDict() if groups else []
     if preserve_scalar_types:
         # Series positional selection retains NumPy scalars; itertuples may
         # convert those scalars to Python builtins. Neither path coerces rows.
-        raw_columns = tuple(selected_frame[name] for name in selected)
-        source_rows = (tuple(column.iloc[position] for column in raw_columns)
-                       for position in range(len(selected_frame)))
+        source_rows = zip(*(_column_scalars(selected_frame[name]) for name in selected))
     else:
         source_rows = selected_frame.itertuples(index=False, name=None)
     original_objects = {}
@@ -191,6 +230,45 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         return result, positions
 
     return build(root, 0)[0]
+
+
+def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report):
+    """Prepare exact grouped labels without materializing each MultiIndex row."""
+    codes = frame.index.codes
+    leaf_axis = 1 - group_axis
+    grouped = {}
+    for position, (group, key) in enumerate(zip(codes[group_axis].tolist(), codes[leaf_axis].tolist())):
+        key = levels[leaf_axis][key]
+        grouped.setdefault(levels[group_axis][group], []).append((position, key))
+    axes = _axes_metadata(frame, dtypes)
+    leaf_spec = _pandas_index_spec(frame.index.levels[leaf_axis]) if report else None
+    if preserve_scalar_types:
+        values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
+    else:
+        values = frame.to_numpy(copy=False).tolist()
+    tables = {}
+    positions = []
+    for group, entries in grouped.items():
+        offsets, keys = zip(*entries)
+        rows = (values[i] for i in offsets)
+        if preserve_scalar_types:
+            table = Table(keys, rows, columns, leaf_spec, preserve_scalar_types=True)
+        else:
+            table = Table._from_float64(keys, rows, columns, leaf_spec, exact_keys=True)
+        index = ('subset', axes[1], offsets, (group_axis,))
+        if report:
+            metadata = ('frame', index, *axes[2:], None, (), deepcopy(frame.attrs),
+                        frame.flags.allows_duplicate_labels, (),
+                        (frame.columns.dtype, frame.columns.name), None)
+        else:
+            metadata = ('axes', index, *axes[2:])
+        object.__setattr__(table, '_metadata', metadata)
+        tables[group] = table
+        positions.extend(offsets)
+    result = Record(tables)
+    order = tuple(sorted(range(len(positions)), key=positions.__getitem__))
+    object.__setattr__(result, '_metadata', ('grouped', *axes[1:], order))
+    return result
 
 
 def _axes_metadata(frame, dtypes=None):
@@ -298,6 +376,13 @@ def _pandas_index_spec(index):
     levels = index.levels if multi else (index,)
     modes = []
     for level in levels:
+        if type(level) in (pd.Index, pd.RangeIndex) and isinstance(level.dtype, np.dtype):
+            if level.dtype.kind in 'iuf':
+                modes.append(2)
+                continue
+            if level.dtype.kind == 'b':
+                modes.append(1 if len(level) else 2)
+                continue
         values = tuple(_key(value) for value in level)
         if values and all(type(value) is bool for value in values):
             modes.append(1)

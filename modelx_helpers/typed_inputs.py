@@ -185,10 +185,6 @@ lookup.__modelx_cython_bound_grouped__ = ('bound_group_probe', 'bound_group_valu
 
 # The ordered-key producer is one function, shared with generator consumers.
 from .table_keys import keys
-lookup.__modelx_cython_float_numeric__ = 'lookup_float_f64'
-lookup.__modelx_cython_keyed_float_numeric__ = (
-    'lookup_key0_float_f64', 'lookup_key1_float_f64', 'lookup_key2_float_f64',
-    'lookup_key3_float_f64', 'lookup_key4_float_f64')
 
 
 # Explicit operations: their .pxd return declarations drive native typing.

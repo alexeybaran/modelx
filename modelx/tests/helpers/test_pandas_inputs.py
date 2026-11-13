@@ -169,6 +169,27 @@ def test_grouped_leaf_keeps_lookup_policy_when_owning_pandas_axes(options):
         assert h.contains(leaf, key) is (not options)
 
 
+@pytest.mark.parametrize('preserve_scalar_types', [False, True])
+def test_grouped_lookup_reports_keep_leaf_metadata(preserve_scalar_types):
+    index = pd.MultiIndex.from_tuples(
+        [(4, 'A'), (1, 'B'), (2, 'A')], names=['year', 'group'])
+    frame = pd.DataFrame({'rate': [0.4, 0.1, 0.2]}, index=index)
+    frame.attrs['inputs'] = ['rates']
+    frame.flags.allows_duplicate_labels = False
+    groups = inputs.table(frame, groups=('group',), report=True,
+                          preserve_scalar_types=preserve_scalar_types)
+    leaf = groups['A']
+    expected = frame.xs('A', level='group')
+    frame.attrs['inputs'].append('changed')
+    pd.testing.assert_frame_equal(to_pandas(leaf), expected, check_exact=True)
+    series = to_pandas(column(leaf, 'rate', report=True))
+    pd.testing.assert_series_equal(series, expected['rate'], check_exact=True)
+    assert series.attrs == {'inputs': ['rates']}
+    assert not series.flags.allows_duplicate_labels
+    with pytest.raises(ValueError, match='rows=True'):
+        row(leaf, 4)
+
+
 def test_frozen_pandas_object_cells_restore_original_container_values():
     data = {'rates': [0.5, (1.0,)]}
     frame = pd.DataFrame({'inputs': [data, ('annuity', [2.0])]},
@@ -191,3 +212,17 @@ def test_frozen_pandas_object_cells_restore_original_container_values():
     pd.testing.assert_series_equal(to_pandas(column(report, 'inputs', report=True)),
                                    expected['inputs'])
     assert h.lookup(plain, 1, 'inputs')['rates'] == (0.5, (1.0,))
+
+
+def test_lookup_only_float64_preparation_owns_scalars_and_keys():
+    frame = pd.DataFrame({"rate": [-0.0, float("nan"), 0.25]},
+                         index=pd.MultiIndex.from_tuples([("A", 2), ("A", 1), ("B", 3)]))
+    owned = inputs.table(frame)
+    scalar_preserving = inputs.table(frame, preserve_scalar_types=True)
+    frame.iloc[0, 0] = 7.0
+    value = owned.lookup(("A", 2), "rate")
+    assert type(value) is float and math.copysign(1.0, value) == -1.0
+    assert math.isnan(owned.lookup(("A", 1), "rate"))
+    assert type(scalar_preserving.lookup(("A", 2), "rate")) is np.float64
+    assert scalar_preserving.lookup(("A", 2), "rate") == 0.0
+    assert list(owned.index) == [("A", 2), ("A", 1), ("B", 3)]
