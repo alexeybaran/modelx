@@ -171,6 +171,13 @@ class _TableLoc:
         table = self._table
         if type(item) is tuple and len(item) == 2 and type(item[1]) is str and item[1] in table._columns:
             return table.lookup(item[0], item[1])
+        # a partial key already selected: the shared child (Decision 13.3)
+        prefix = item if type(item) is tuple else (item,)
+        entry = table._native_cache.get(('prefix_children', len(prefix)))
+        if entry is not None:
+            child = entry[0].get(prefix)
+            if child is not None and _modes_admit(prefix, entry[1]):
+                return child
         if type(item) is slice or (type(item) is tuple and any(type(part) is slice for part in item)):
             raise TypeError('Table.loc supports loc[key, "column"] and loc[key], not slices')
         prefix = _key_prefix(table, item)
@@ -207,6 +214,16 @@ def _key_prefix(table, item):
     return prefix if 0 < len(prefix) < len(keys[0]) else None
 
 
+def _modes_admit(prefix, modes):
+    """False when a part breaks its level's pandas boolean label mode (1: bool only, 2: no bool)."""
+    for part, mode in zip(prefix, modes):
+        if mode:
+            boolean = type(part) is bool or type(part).__name__ == 'bool_'
+            if boolean != (mode == 1):
+                return False
+    return True
+
+
 def _sub_table(table, item, prefix):
     """``table.loc[prefix]`` on a multi-level table, as pandas: the matching rows with the selected
     levels dropped (a scalar key when one level is left); KeyError(item) when nothing matches.
@@ -218,10 +235,8 @@ def _sub_table(table, item, prefix):
     """
     count, spec = len(prefix), table._index_error
     modes = spec['boolean_modes'] if spec is not None else ()
-    for part, mode in zip(prefix, modes):
-        boolean = type(part) is bool or type(part).__name__ == 'bool_'
-        if (mode == 1 and not boolean) or (mode == 2 and boolean):
-            raise KeyError(item)
+    if not _modes_admit(prefix, modes):
+        raise KeyError(item)
     cache = table._native_cache
     groups = cache.get(('prefix_rows', count))
     if groups is None:
@@ -229,9 +244,11 @@ def _sub_table(table, item, prefix):
         for position, key in enumerate(table._keys):
             grouping.setdefault(key[:count], []).append(position)
         groups = cache.setdefault(('prefix_rows', count), grouping)
-    children = cache.get(('prefix_children', count))
-    if children is None:
-        children = cache.setdefault(('prefix_children', count), {})
+    entry = cache.get(('prefix_children', count))
+    if entry is None:
+        # (children by prefix value, the prefix levels' pandas boolean label modes)
+        entry = cache.setdefault(('prefix_children', count), ({}, tuple(modes[:count])))
+    children = entry[0]
     child = children.get(prefix)
     if child is not None:
         return child
