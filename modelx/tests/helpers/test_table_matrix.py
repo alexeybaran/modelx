@@ -204,7 +204,8 @@ def _keys_for(frame):
     if _levels(frame) == 1 and type(labels[0]) is str:
         return labels + ['zz', '', 0, True, None, float('nan'), np.str_(labels[0])]
     if _levels(frame) == 1:
-        keys = labels + [labels[0] - 1, labels[-1] + 1, 'x', True, False, None, float('nan')]
+        keys = labels + [labels[0] - 1, labels[-1] + 1, 'x', True, False, None, float('nan'),
+                         (labels[0], labels[0])]
         first = labels[0]
         keys += [float(first), first + 0.5, np.int64(first), np.float32(first), np.float64(first),
                  np.float64(first + 0.5), np.bool_(True)]

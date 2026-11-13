@@ -650,7 +650,7 @@ def _find_row(table, key, storage=None):
     if kind == 'contiguous':
         number = key if key_type is int else _integral(key)
         if number is None:
-            if key_type in (str, bytes, float, bool) or key is None or key_type.__module__ == 'numpy':
+            if key_type in (str, bytes, float, bool, tuple) or key is None or key_type.__module__ == 'numpy':
                 raise KeyError(key)
             try:
                 return table._positions[key]       # exotic numbers: equality as a dict
