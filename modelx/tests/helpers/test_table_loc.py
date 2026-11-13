@@ -103,3 +103,39 @@ def test_index_asof_matches_pandas(labels, queries):
         return 'nan' if isinstance(value, float) and math.isnan(value) else value
     for label in queries:
         assert outcome(lambda: table.index.asof(label)) == outcome(lambda: frame.index.asof(label)), label
+
+
+def _prefix_frame():
+    return pd.DataFrame({'s': ['M', 'M', 'M', 'F', 'F'], 'c': ['A', 'A', 'B', 'A', 'A'],
+                         'y': [1, 2, 1, 1, 3], 'v': [1., 2., 3., 4., 5.], 'w': [9., 8., 7., 6., 5.]}
+                        ).set_index(['s', 'c', 'y'])
+
+
+@pytest.mark.filterwarnings('ignore::pandas.errors.PerformanceWarning')
+@pytest.mark.parametrize('prefix', ['M', ('M',), ('M', 'A'), ('F', 'A'), 'X', ('M', 'Z')])
+def test_partial_key_selection_matches_pandas(prefix):
+    frame = _prefix_frame()
+    table = pdn.table(frame)
+    try:
+        expected = frame.loc[prefix]
+    except KeyError:
+        with pytest.raises(KeyError):
+            table.loc[prefix]
+        return
+    sub = table.loc[prefix]
+    assert type(sub) is type(table)
+    assert list(sub._keys) == list(expected.index)
+    assert [list(values) for values in sub._values] == expected.values.tolist()
+    assert sub.index.max() == expected.index.max() and sub.index.min() == expected.index.min()
+    if not isinstance(sub._keys[0], tuple):
+        for k in (0, 1, 2, 3, 9):
+            assert sub.index.asof(k) == expected.index.asof(k) or (k == 0 and expected.index.asof(k) != expected.index.asof(k))
+            assert (k in sub.index) == (k in expected.index)
+            column, series = sub['w'], expected['w']
+            assert (k in column) == (k in series)
+            if k in series:
+                assert sub.loc[k, 'v'] == expected.loc[k, 'v'] and column[k] == series[k]
+            else:
+                with pytest.raises(KeyError):
+                    column[k]
+        assert list(sub['w']) == list(expected['w']) and sub['w'].index.max() == expected['w'].index.max()

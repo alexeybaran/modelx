@@ -173,6 +173,9 @@ class _TableLoc:
             return table.lookup(item[0], item[1])
         if type(item) is slice or (type(item) is tuple and any(type(part) is slice for part in item)):
             raise TypeError('Table.loc supports loc[key, "column"] and loc[key], not slices')
+        prefix = _key_prefix(table, item)
+        if prefix is not None:
+            return _sub_table(table, item, prefix)
         metadata = table._metadata
         if metadata is not None and metadata[0] == 'frame' and metadata[4] is not None:
             return table.slice(item)
@@ -193,6 +196,66 @@ class _TableLoc:
             except KeyError:
                 raise KeyError(item) from None
         return _stored_row(table, position)
+
+
+def _key_prefix(table, item):
+    """The prefix tuple when ``item`` selects fewer levels than a multi-level table has, else None."""
+    keys = table._keys
+    if not keys or type(keys[0]) is not tuple:
+        return None
+    prefix = item if type(item) is tuple else (item,)
+    return prefix if 0 < len(prefix) < len(keys[0]) else None
+
+
+def _sub_table(table, item, prefix):
+    """``table.loc[prefix]`` on a multi-level table, as pandas: the matching rows with the selected
+    levels dropped (a scalar key when one level is left); KeyError(item) when nothing matches."""
+    count, spec = len(prefix), table._index_error
+    modes = spec['boolean_modes'] if spec is not None else ()
+    for part, mode in zip(prefix, modes):
+        boolean = type(part) is bool or type(part).__name__ == 'bool_'
+        if (mode == 1 and not boolean) or (mode == 2 and boolean):
+            raise KeyError(item)
+    rows = [(key[count:] if len(key) - count > 1 else key[count], values)
+            for key, values in zip(table._keys, table._values) if key[:count] == prefix]
+    if not rows:
+        raise KeyError(item)
+    sub_spec = None
+    if spec is not None:
+        sub_spec = dict(spec._index)
+        sub_spec.update(multi=len(table._keys[0]) - count > 1, boolean_modes=tuple(modes[count:]))
+    return Table([key for key, _ in rows], [values for _, values in rows], table._columns, sub_spec,
+                 preserve_scalar_types=table._preserve_scalar_types)
+
+
+class _TableColumn(Mapping):
+    """``table["col"]``: one column as a label -> value mapping, read like a pandas Series.
+
+    ``column[label]`` and ``label in column`` select by row label; ``column.index`` is the table's
+    index (``max()``, ``min()``, ``asof()``); iteration yields the values, as a Series does.
+    """
+
+    __slots__ = ('_table', '_column')
+
+    def __init__(self, table, column):
+        self._table, self._column = table, column
+
+    def __getitem__(self, label):
+        return self._table.lookup(label, self._column)
+
+    def __contains__(self, label):
+        return self._table.contains(label)
+
+    def __iter__(self):
+        position = self._table._columns.index(self._column)
+        return iter(tuple(values[position] for values in self._table._values))
+
+    def __len__(self):
+        return len(self._table._keys)
+
+    @property
+    def index(self):
+        return self._table.index
 
 
 def _stored_row(table, position):
@@ -270,6 +333,8 @@ class Table(Mapping):
             return self._values
         if key == 'columns':
             return self._columns
+        if type(key) is str and key in self._columns:
+            return _TableColumn(self, key)       # pandas spelling: frame["col"]
         raise KeyError(key)
 
     def __iter__(self):
