@@ -283,6 +283,14 @@ def _rectangular_axes(index):
 
 def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types, report):
     """Prepare exact grouped labels without materializing each MultiIndex row."""
+    if group_axis == 0 and len(levels[1]) > 0:
+        axes = _rectangular_axes(frame.index)
+        if axes is not None and all(type(key) is int for key in axes[1]):
+            keys = axes[1]
+            if keys == tuple(range(keys[0], keys[0] + len(keys))) and (
+                    all(dtype == dtypes[0] for dtype in dtypes)
+                    and dtypes[0] in (np.dtype('int64'), np.dtype('float64'))):
+                return _contiguous_groups(frame, columns, axes, dtypes, preserve_scalar_types, report)
     codes = frame.index.codes
     leaf_axis = 1 - group_axis
     grouped = {}
@@ -317,6 +325,31 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
     result = Record(tables)
     order = tuple(sorted(range(len(positions)), key=positions.__getitem__))
     object.__setattr__(result, '_metadata', ('grouped', *axes[1:], order))
+    return result
+
+
+def _contiguous_groups(frame, columns, axes, dtypes, preserve_scalar_types, report):
+    metadata = _axes_metadata(frame, dtypes)
+    leaf_spec = _pandas_index_spec(frame.index.levels[1]) if report else None
+    data = np.array(frame.to_numpy(copy=False), order='C', copy=True)
+    data.setflags(write=False)
+    groups, keys = axes
+    tables = {}
+    width = len(keys)
+    for position, group in enumerate(groups):
+        start = position * width
+        offsets = range(start, start + width)
+        index = ('subset', metadata[1], offsets, (0,))
+        if report:
+            leaf_metadata = ('frame', index, *metadata[2:], None, (), deepcopy(frame.attrs),
+                             frame.flags.allows_duplicate_labels, (),
+                             (frame.columns.dtype, frame.columns.name), None)
+        else:
+            leaf_metadata = ('axes', index, *metadata[2:])
+        tables[group] = Table._from_contiguous(keys, data[start:start + width], tuple(columns),
+                                                leaf_spec, leaf_metadata, preserve_scalar_types)
+    result = Record(tables)
+    object.__setattr__(result, '_metadata', ('grouped', *metadata[1:], range(len(data))))
     return result
 
 
