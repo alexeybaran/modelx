@@ -52,6 +52,12 @@ def _record_metadata(result, metadata, values):
     object.__setattr__(result, '_metadata', metadata)
 
 
+def _column_scalars(column):
+    if isinstance(column.dtype, np.dtype) and column.dtype.kind in 'biuf':
+        return iter(column.to_numpy(copy=False))
+    return (column.iloc[position] for position in range(len(column)))
+
+
 def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=False,
           preserve_scalar_types=False):
     """Build an existing Table, optionally nested in explicit group Records.
@@ -111,13 +117,19 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                            if i not in grouped_positions]
     if groups and not remaining_positions:
         raise ValueError('grouping must leave at least one leaf key level')
+    if (type(frame) is pd.DataFrame and not (groups or rows or report or preserve_scalar_types)
+            and all(dtype == np.dtype('float64') for dtype in dtypes)):
+        # ndarray.tolist returns the same built-in float scalars as
+        # itertuples for native float64. Table still owns and validates keys.
+        result = Table([_key(label) for label in source_index],
+                       selected_frame.to_numpy(copy=False).tolist(), selected, index_error)
+        object.__setattr__(result, '_metadata', _axes_metadata(selected_frame, dtypes))
+        return result
     root = OrderedDict() if groups else []
     if preserve_scalar_types:
         # Series positional selection retains NumPy scalars; itertuples may
         # convert those scalars to Python builtins. Neither path coerces rows.
-        raw_columns = tuple(selected_frame[name] for name in selected)
-        source_rows = (tuple(column.iloc[position] for column in raw_columns)
-                       for position in range(len(selected_frame)))
+        source_rows = zip(*(_column_scalars(selected_frame[name]) for name in selected))
     else:
         source_rows = selected_frame.itertuples(index=False, name=None)
     original_objects = {}

@@ -191,3 +191,17 @@ def test_frozen_pandas_object_cells_restore_original_container_values():
     pd.testing.assert_series_equal(to_pandas(column(report, 'inputs', report=True)),
                                    expected['inputs'])
     assert h.lookup(plain, 1, 'inputs')['rates'] == (0.5, (1.0,))
+
+
+def test_lookup_only_float64_preparation_owns_scalars_and_keys():
+    frame = pd.DataFrame({"rate": [-0.0, float("nan"), 0.25]},
+                         index=pd.MultiIndex.from_tuples([("A", 2), ("A", 1), ("B", 3)]))
+    owned = inputs.table(frame)
+    scalar_preserving = inputs.table(frame, preserve_scalar_types=True)
+    frame.iloc[0, 0] = 7.0
+    value = owned.lookup(("A", 2), "rate")
+    assert type(value) is float and math.copysign(1.0, value) == -1.0
+    assert math.isnan(owned.lookup(("A", 1), "rate"))
+    assert type(scalar_preserving.lookup(("A", 2), "rate")) is np.float64
+    assert scalar_preserving.lookup(("A", 2), "rate") == 0.0
+    assert list(owned.index) == [("A", 2), ("A", 1), ("B", 3)]
