@@ -258,6 +258,20 @@ def sum_values(source):
     return sum(source)
 
 
+def sum_nonzero_products(values, weights) -> float:
+    """Sum products in order, skipping multiplication for zero values."""
+    return float(sum(value * weight for value, weight in zip(values, weights) if value != 0.0))
+
+
+def shift_scale(values, weights, first):
+    """Create a double buffer with a new first value and scaled preceding cohorts."""
+    from array import array
+
+    result = array("d", [first])
+    result.extend(value * weight for value, weight in zip(values[:-1], weights))
+    return result
+
+
 def _FloatTerms(source):
     converter = _FLOAT
     return (converter(value) for value in source)
@@ -283,6 +297,8 @@ _FLOAT = float
 _PERIODS, _OVER, _FLATTEN = periods, over, flatten
 _ZIP_VALUES = zip_values
 _SUM_VALUES, _SUM_FLOAT = sum_values, sum_float
+_SUM_NONZERO_PRODUCTS = sum_nonzero_products
+_SHIFT_SCALE = shift_scale
 for _function in (_PERIODS, _OVER, _FLATTEN, _SUM_VALUES, _SUM_FLOAT, _ZIP_VALUES):
     _function.__modelx_cython_helper__ = ('modelx_cython.runtime._native_streams', _function.__name__)
     _function.__modelx_native_operation__ = _function.__name__
@@ -293,3 +309,8 @@ for _function in (_PERIODS, _OVER, _FLATTEN, _SUM_VALUES, _SUM_FLOAT, _ZIP_VALUE
 # boundary with proven double contributions. The general helper remains ordinary
 # Python sum, including integer zero, arbitrary integers and mixed arithmetic.
 _SUM_VALUES.__modelx_cython_reduction__ = 'ordinary_sum'
+_SUM_NONZERO_PRODUCTS.__modelx_cython_helper__ = ('modelx_cython.runtime._native_streams',
+                                               'sum_nonzero_products')
+_SUM_NONZERO_PRODUCTS.__modelx_cython_scalar_result__ = 'float64'
+_SHIFT_SCALE.__modelx_cython_helper__ = ('modelx_cython.runtime._native_streams', 'shift_scale')
+_SHIFT_SCALE.__modelx_cython_scalar_result__ = 'object'
