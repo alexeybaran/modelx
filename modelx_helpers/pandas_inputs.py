@@ -65,8 +65,10 @@ def _keys_from_index(index):
             # Reuse exact immutable labels when pandas has no missing codes.
             columns = (np.array(level, dtype=object)[codes].tolist()
                        for level, codes in zip(levels, index.codes))
-            return list(zip(*columns))
-    return [_key(label) for label in index]
+            return list(zip(*columns)), True
+    if type(index) in (pd.Index, pd.RangeIndex) and isinstance(index.dtype, np.dtype) and index.dtype.kind in 'iu':
+        return list(index), True
+    return [_key(label) for label in index], False
 
 
 def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=False,
@@ -132,8 +134,9 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
             and all(dtype == np.dtype('float64') for dtype in dtypes)):
         # ndarray.tolist returns the same built-in float scalars as
         # itertuples for native float64. Table still owns and validates keys.
-        result = Table(_keys_from_index(source_index),
-                       selected_frame.to_numpy(copy=False).tolist(), selected, index_error)
+        keys, exact_keys = _keys_from_index(source_index)
+        result = Table._from_float64(keys, selected_frame.to_numpy(copy=False).tolist(),
+                                     selected, index_error, exact_keys=exact_keys)
         object.__setattr__(result, '_metadata', _axes_metadata(selected_frame, dtypes))
         return result
     root = OrderedDict() if groups else []
@@ -321,6 +324,13 @@ def _pandas_index_spec(index):
     levels = index.levels if multi else (index,)
     modes = []
     for level in levels:
+        if type(level) in (pd.Index, pd.RangeIndex) and isinstance(level.dtype, np.dtype):
+            if level.dtype.kind in 'iuf':
+                modes.append(2)
+                continue
+            if level.dtype.kind == 'b':
+                modes.append(1 if len(level) else 2)
+                continue
         values = tuple(_key(value) for value in level)
         if values and all(type(value) is bool for value in values):
             modes.append(1)
