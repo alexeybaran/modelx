@@ -108,9 +108,15 @@ class Table(Mapping):
     @classmethod
     def _from_float64(cls, keys, values, columns, index_error, *, exact_keys):
         """Own ndarray.tolist() rows, whose values are already immutable floats."""
+        return cls._from_primitive_rows(keys, values, columns, index_error,
+                                        exact_keys=exact_keys, preserve_scalar_types=False)
+
+    @classmethod
+    def _from_primitive_rows(cls, keys, values, columns, index_error, *,
+                             exact_keys, preserve_scalar_types):
         table = cls.__new__(cls)
         Table._initialize(table, tuple(keys), tuple(map(tuple, values)), tuple(columns),
-                          index_error, False, exact_keys=exact_keys)
+                          index_error, preserve_scalar_types, exact_keys=exact_keys)
         return table
 
     def _initialize(self, keys, values, columns, index_error, preserve_scalar_types,

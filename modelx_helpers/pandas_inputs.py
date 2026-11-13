@@ -261,7 +261,10 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
     axes = _axes_metadata(frame, dtypes)
     leaf_spec = _pandas_index_spec(frame.index.levels[leaf_axis]) if report else None
     if preserve_scalar_types:
-        values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
+        if all(dtype == dtypes[0] for dtype in dtypes):
+            values = frame.to_numpy(copy=False)
+        else:
+            values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
     else:
         values = frame.to_numpy(copy=False).tolist()
     tables = {}
@@ -269,10 +272,8 @@ def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_sca
     for group, entries in grouped.items():
         offsets, keys = zip(*entries)
         rows = (values[i] for i in offsets)
-        if preserve_scalar_types:
-            table = Table(keys, rows, columns, leaf_spec, preserve_scalar_types=True)
-        else:
-            table = Table._from_float64(keys, rows, columns, leaf_spec, exact_keys=True)
+        table = Table._from_primitive_rows(keys, rows, columns, leaf_spec,
+                                           exact_keys=True, preserve_scalar_types=preserve_scalar_types)
         index = ('subset', axes[1], offsets, (group_axis,))
         if report:
             metadata = ('frame', index, *axes[2:], None, (), deepcopy(frame.attrs),
