@@ -107,20 +107,34 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     if indexing == 'at' and groups:
         raise ValueError('at preparation requires complete keys')
     index_error = _pandas_index_spec(frame.index) if not groups else None
-    selected = list(frame.columns) if columns is None else list(columns)
+    selected = tuple(frame.columns) if columns is None else tuple(columns)
     if not selected or any(type(name) is not str for name in selected):
         raise ValueError('table columns must be nonempty strings')
     if len(set(selected)) != len(selected) or not frame.columns.is_unique:
         raise ValueError('table columns must be unique')
-    if type(frame) is pd.DataFrame and tuple(frame.columns) == tuple(selected):
+    exact_frame = type(frame) is pd.DataFrame
+    source_index = frame.index
+    if (exact_frame and not isinstance(frame.columns, pd.MultiIndex)
+            and not (groups or rows or report or preserve_scalar_types) and len(selected) == 1):
+        # Read a single calculation column directly. Constructing a frame via
+        # .loc first materializes a second column axis and dtype Series.
+        location = frame.columns.get_indexer(selected)[0]
+        column = frame[selected[0]] if location >= 0 else None
+        if type(column) is pd.Series and column.dtype == np.dtype('float64'):
+            keys, exact_keys = _keys_from_index(source_index)
+            result = Table._from_float64(keys, ((value,) for value in column.to_numpy(copy=False).tolist()),
+                                         selected, index_error, exact_keys=exact_keys)
+            axis = frame.columns.take((location,))
+            object.__setattr__(result, '_metadata', ('axes', source_index.copy(deep=True), axis, (column.dtype,)))
+            return result
+    if exact_frame and tuple(frame.columns) == selected:
         selected_frame = frame
     else:
-        selected_frame = frame.loc[:, selected]
+        selected_frame = frame.loc[:, list(selected)]
     dtypes = tuple(selected_frame.dtypes)
     object_columns = tuple(i for i, dtype in enumerate(dtypes)
                            if getattr(dtype, 'kind', None) == 'O'
                            and not isinstance(dtype, pd.StringDtype))
-    source_index = frame.index
     multi_index = isinstance(source_index, pd.MultiIndex)
     names = list(source_index.names)
     groups = tuple(groups)
