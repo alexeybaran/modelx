@@ -338,7 +338,12 @@ def record(row, *, preserve_scalar_types=False):
     if preserve_scalar_types:
         # Series.items() can yield Python scalars while Series[key] returns a
         # numpy scalar. Preserve the actual public scalar-selection contract.
-        values = {key: row[key] for key in row.index}
+        if (type(row) is pd.Series and isinstance(row.dtype, np.dtype)
+                and row.dtype.kind in 'biufcO'
+                and type(row.index) in (pd.Index, pd.RangeIndex)):
+            values = dict(zip(row.index, row.to_numpy(copy=False)))
+        else:
+            values = {key: row[key] for key in row.index}
         result = Record(values, preserve_scalar_types=True)
     else:
         values = dict(row.items())

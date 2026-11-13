@@ -93,7 +93,8 @@ def test_public_row_can_remain_series_with_separate_owned_record():
 
 
 @pytest.mark.parametrize('dtype,values', [('int64', [42, 43]), ('float64', [0.1, 0.2]),
-                                        ('bool', [True, False]), ('Int64', [42, pd.NA])])
+                                        ('bool', [True, False]), ('Int64', [42, pd.NA]),
+                                        ('complex128', [1 + 2j, 3 + 4j]), ('object', [42, 'label'])])
 def test_explicit_record_preserves_public_scalar_selection_types(dtype, values):
     row = pd.Series(values, index=['a', 'b'], dtype=dtype)
     prepared = inputs.record(row, preserve_scalar_types=True)
