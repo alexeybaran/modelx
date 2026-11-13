@@ -272,7 +272,7 @@ def _rectangular_axes(index):
     shape = tuple(len(level) for level in levels)
     if not len(index) or prod(shape) != len(index):
         return None
-    axes = tuple(tuple(level) for level in levels)
+    axes = tuple(tuple(level.to_numpy(copy=False).tolist()) for level in levels)
     if any(type(part) not in (str, int) for labels in axes for part in labels):
         return None
     strides = [1]
@@ -284,7 +284,7 @@ def _rectangular_axes(index):
         digits = blocks[0, :, 0]
         if not np.all(blocks == digits.reshape((1, size, 1))):
             return None
-        original = tuple(int(digit) for digit in digits)
+        original = digits.tolist()
         if min(original) < 0 or len(set(original)) != size:
             return None
         ordered.append(tuple(labels[digit] for digit in original))
