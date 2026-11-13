@@ -133,16 +133,33 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                            if i not in grouped_positions]
     if groups and not remaining_positions:
         raise ValueError('grouping must leave at least one leaf key level')
-    if (type(frame) is pd.DataFrame and len(groups) == 1 and not (rows or report)
-            and multi_index and source_index.nlevels == 2
+    exact_numeric_rows = False
+    if (type(frame) is pd.DataFrame and groups and not (rows or report)
+            and multi_index and len(remaining_positions) == 1
             and (all(dtype == np.dtype('float64') for dtype in dtypes)
                  or preserve_scalar_types and all(isinstance(dtype, np.dtype) and dtype.kind in 'biuf'
                                                   for dtype in dtypes))
             and all((codes >= 0).all() for codes in source_index.codes)):
         labels = [tuple(level) for level in source_index.levels]
         if all(type(label) in (int, str) for level in labels for label in level):
-            return _single_group_table(selected_frame, selected, grouped_positions[0],
-                                       labels, dtypes, preserve_scalar_types)
+            indices = (*grouped_positions, remaining_positions[0])
+            parts = [np.array(labels[axis], dtype=object)[source_index.codes[axis]].tolist()
+                     for axis in indices]
+            root = {}
+            if preserve_scalar_types:
+                values = zip(*(_column_scalars(selected_frame[name]) for name in selected))
+            else:
+                values = selected_frame.to_numpy(copy=False).tolist()
+                exact_numeric_rows = True
+            for position, (keys, row) in enumerate(zip(zip(*parts), values)):
+                branch = root
+                for group in keys[:-2]:
+                    branch = branch.setdefault(group, {})
+                branch.setdefault(keys[-2], []).append((keys[-1], row, position))
+        else:
+            root = None
+    else:
+        root = None
     if (type(frame) is pd.DataFrame and not (groups or rows or report or preserve_scalar_types)
             and all(dtype == np.dtype('float64') for dtype in dtypes)):
         # ndarray.tolist returns the same built-in float scalars as
@@ -152,31 +169,32 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                                      selected, index_error, exact_keys=exact_keys)
         object.__setattr__(result, '_metadata', _axes_metadata(selected_frame, dtypes))
         return result
-    root = OrderedDict() if groups else []
-    if preserve_scalar_types:
-        # Series positional selection retains NumPy scalars; itertuples may
-        # convert those scalars to Python builtins. Neither path coerces rows.
-        source_rows = zip(*(_column_scalars(selected_frame[name]) for name in selected))
-    else:
-        source_rows = selected_frame.itertuples(index=False, name=None)
     original_objects = {}
-    for position, (label, row) in enumerate(zip(source_index, source_rows)):
-        parts = tuple(label) if multi_index else (label,)
-        parts = tuple(_key(part) for part in parts)
-        leaf_parts = tuple(parts[i] for i in remaining_positions)
-        key = leaf_parts[0] if len(leaf_parts) == 1 else leaf_parts
-        value = tuple(row) if preserve_scalar_types else tuple(_scalar(item) for item in row)
-        if object_columns and not preserve_scalar_types:
-            containers = _container_values(row, object_columns)
-            if containers:
-                original_objects[position] = containers
-        if not groups:
-            root.append((key, value, position))
-            continue
-        branch = root
-        for group_position in grouped_positions[:-1]:
-            branch = branch.setdefault(parts[group_position], OrderedDict())
-        branch.setdefault(parts[grouped_positions[-1]], []).append((key, value, position))
+    if root is None:
+        root = {} if groups else []
+        if preserve_scalar_types:
+            # Series positional selection retains NumPy scalars; itertuples may
+            # convert those scalars to Python builtins.
+            source_rows = zip(*(_column_scalars(selected_frame[name]) for name in selected))
+        else:
+            source_rows = selected_frame.itertuples(index=False, name=None)
+        for position, (label, row) in enumerate(zip(source_index, source_rows)):
+            parts = tuple(label) if multi_index else (label,)
+            parts = tuple(_key(part) for part in parts)
+            leaf_parts = tuple(parts[i] for i in remaining_positions)
+            key = leaf_parts[0] if len(leaf_parts) == 1 else leaf_parts
+            value = tuple(row) if preserve_scalar_types else tuple(_scalar(item) for item in row)
+            if object_columns and not preserve_scalar_types:
+                containers = _container_values(row, object_columns)
+                if containers:
+                    original_objects[position] = containers
+            if not groups:
+                root.append((key, value, position))
+                continue
+            branch = root
+            for group_position in grouped_positions[:-1]:
+                branch = branch.setdefault(parts[group_position], {})
+            branch.setdefault(parts[grouped_positions[-1]], []).append((key, value, position))
 
     axes = _axes_metadata(selected_frame, dtypes) if groups else None
 
@@ -189,9 +207,13 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
                 # Plain grouped leaves use ordinary Table keys.
                 leaf_index = axes[1].take(list(positions)).droplevel(grouped_positions)
                 leaf_spec = _pandas_index_spec(leaf_index)
-            result = Table([entry[0] for entry in branch],
-                           [entry[1] for entry in branch], selected, leaf_spec,
-                           preserve_scalar_types=preserve_scalar_types)
+            keys = [entry[0] for entry in branch]
+            values = [entry[1] for entry in branch]
+            if exact_numeric_rows:
+                result = Table._from_float64(keys, values, selected, leaf_spec, exact_keys=True)
+            else:
+                result = Table(keys, values, selected, leaf_spec,
+                               preserve_scalar_types=preserve_scalar_types)
             if rows or report:
                 leaf = selected_frame
                 if groups:
@@ -230,38 +252,6 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
         return result, positions
 
     return build(root, 0)[0]
-
-
-def _single_group_table(frame, columns, group_axis, levels, dtypes, preserve_scalar_types):
-    """Prepare exact grouped labels without materializing each MultiIndex row."""
-    codes = frame.index.codes
-    leaf_axis = 1 - group_axis
-    grouped = {}
-    for position, (group, key) in enumerate(zip(codes[group_axis].tolist(), codes[leaf_axis].tolist())):
-        key = levels[leaf_axis][key]
-        grouped.setdefault(levels[group_axis][group], []).append((position, key))
-    axes = _axes_metadata(frame, dtypes)
-    if preserve_scalar_types:
-        values = tuple(zip(*(_column_scalars(frame[name]) for name in columns)))
-    else:
-        values = frame.to_numpy(copy=False).tolist()
-    tables = {}
-    positions = []
-    for group, entries in grouped.items():
-        offsets, keys = zip(*entries)
-        rows = (values[i] for i in offsets)
-        if preserve_scalar_types:
-            table = Table(keys, rows, columns, preserve_scalar_types=True)
-        else:
-            table = Table._from_float64(keys, rows, columns, None, exact_keys=True)
-        index = ('subset', axes[1], offsets, (group_axis,))
-        object.__setattr__(table, '_metadata', ('axes', index, *axes[2:]))
-        tables[group] = table
-        positions.extend(offsets)
-    result = Record(tables)
-    order = tuple(sorted(range(len(positions)), key=positions.__getitem__))
-    object.__setattr__(result, '_metadata', ('grouped', *axes[1:], order))
-    return result
 
 
 def _axes_metadata(frame, dtypes=None):
