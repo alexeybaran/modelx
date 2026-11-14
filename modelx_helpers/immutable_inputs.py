@@ -1444,3 +1444,24 @@ def _pandas_selector(item):
 
 _with_pandas_fallback(_TableLoc, 'loc')
 _with_pandas_fallback(_TableAt, 'at')
+
+
+def _table_operator(name):
+    """``DataFrame.<name>`` on a frame-built table (``T * 2``, ``T < x``, ``-T``...); NotImplemented on other
+    tables, which keep raising TypeError as before. ``==``/``!=`` keep the Mapping equality (D35)."""
+    def operator(self, *args):
+        if _frame_of(self) is None:
+            return NotImplemented
+        args = tuple(_frame_of(a).copy(deep=False) if isinstance(a, Table) and _frame_of(a) is not None else a
+                     for a in args)
+        return getattr(_fallback(self, 'T ' + name), name)(*args)
+    operator.__name__ = name
+    return operator
+
+
+for _name in ('__lt__', '__le__', '__gt__', '__ge__', '__add__', '__radd__', '__sub__', '__rsub__',
+              '__mul__', '__rmul__', '__truediv__', '__rtruediv__', '__floordiv__', '__rfloordiv__',
+              '__mod__', '__rmod__', '__pow__', '__rpow__', '__matmul__', '__rmatmul__', '__and__', '__rand__',
+              '__or__', '__ror__', '__xor__', '__rxor__', '__neg__', '__pos__', '__abs__', '__invert__'):
+    setattr(Table, _name, _table_operator(_name))
+del _name
