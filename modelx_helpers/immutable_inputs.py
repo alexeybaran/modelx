@@ -58,6 +58,12 @@ class Record(Mapping):
     def __len__(self):
         return len(self._index)
 
+    @property
+    def index(self):
+        """The field names as a pandas Index (a pandas row's ``.index``), built on each read."""
+        import pandas as pd
+        return pd.Index(tuple(self._index))
+
     def __reduce__(self):
         if getattr(self, '_preserve_scalar_types', False):
             return _restore_record, (type(self), dict(self._items), self._metadata, True)
@@ -990,6 +996,38 @@ class _TableColumn(Mapping):
     @property
     def index(self):
         return self._table.index
+
+    def _series(self):
+        """The column as a pandas Series, a copy of the table's materialised frame (pandas passthrough)."""
+        return _pandas_frame(self._table)[self._column].copy(deep=False)
+
+    def __getattr__(self, name):
+        """A public name outside the column vocabulary (``sum``, ``str``, ``between``, ``loc``, ``all``...)
+        is read from a pandas Series copy, as ``Table`` does with a DataFrame. Materialising expands
+        compact storage for good; formulas read the vocabulary instead (pandas passthrough for tests and
+        reports, never a per-step read)."""
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self._series(), name)
+
+
+def _column_operator(name):
+    def operator(self, *args):
+        args = tuple(a._series() if isinstance(a, _TableColumn) else a for a in args)
+        return getattr(self._series(), name)(*args)
+    operator.__name__ = name
+    operator.__doc__ = f'pandas ``Series.{name}`` on a copy of the column (passthrough).'
+    return operator
+
+
+# Comparison, arithmetic and logical operators of a pandas Series (they raised TypeError before).
+# ``==`` and ``!=`` keep the Mapping equality of the column (pinned, D35).
+for _name in ('__lt__', '__le__', '__gt__', '__ge__', '__add__', '__radd__', '__sub__', '__rsub__',
+              '__mul__', '__rmul__', '__truediv__', '__rtruediv__', '__floordiv__', '__rfloordiv__',
+              '__mod__', '__rmod__', '__pow__', '__rpow__', '__and__', '__rand__', '__or__', '__ror__',
+              '__xor__', '__rxor__', '__neg__', '__pos__', '__abs__', '__invert__'):
+    setattr(_TableColumn, _name, _column_operator(_name))
+del _name
 
 
 def _index_position(index, size):
