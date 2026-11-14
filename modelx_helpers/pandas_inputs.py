@@ -13,15 +13,6 @@ import pandas as pd
 from .immutable_inputs import Record, Table, _copy_container, freeze
 
 
-def isna(value):
-    """Test for missing values with pandas scalar and array semantics."""
-    return pd.isna(value)
-
-
-isna.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'isna')
-isna.__modelx_cython_scalar_result__ = 'object'
-
-
 def _scalar(value):
     # itertuples preserves per-column scalar values; iterrows would coerce a
     # numeric mixed row to one dtype before the explicit preparation boundary.
@@ -467,7 +458,6 @@ def index(labels):
                  ('position',), _pandas_index_spec(labels))
 
 
-
 def _pandas_index_spec(index):
     """Capture the label domains used by pandas scalar selection."""
     multi = isinstance(index, pd.MultiIndex)
@@ -504,20 +494,3 @@ table.__modelx_cython_scalar_result__ = 'object'
 table.__modelx_cython_result_type__ = ('modelx_helpers.immutable_inputs.Table', 'groups')
 
 
-def group_record(tables):
-    """Own a mapping of already prepared tables, retaining the supplied group keys."""
-    return Record(tables)
-
-
-group_record.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'group_record')
-
-
-def select_row(frame, key):
-    """Select a public pandas row at the owning Cell's input boundary.
-
-    Delegate the original .loc semantics, including labels, scalar coercion,
-    duplicate selections and errors. Keeping selection in model_point makes a
-    cleared Projection observe edits to its public input table. Financial
-    formulas can consume record(model_point(), preserve_scalar_types=True).
-    """
-    return frame.loc[key]

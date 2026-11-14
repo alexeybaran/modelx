@@ -104,25 +104,6 @@ def sum_f64(values):
     return sum(values, 0.0)
 
 
-def sum_helper(values):
-    return sum(values, 0.0)
-
-
-def any_true(values):
-    """Return whether the iterable yields any truthy value."""
-    return any(values)
-
-
-def all_true(values):
-    """Return whether every value in the iterable is truthy."""
-    return all(values)
-
-
-def max_value(values):
-    """Return the first greatest value, preserving the iterable's value type."""
-    return max(values)
-
-
 def prepared_interpolation(table, column, years, lookup_fn, last_fn, math_module):
     """Interpolate a numeric column on adjacent integer rows, or return None."""
     if (lookup_fn is not _native_operations['lookup']
@@ -148,40 +129,15 @@ def prepared_interpolation(table, column, years, lookup_fn, last_fn, math_module
     return base + (end - base) * (years - lower)
 
 
-for _operation in (lookup, previous, contains, key_count, key_at, first_key,
-                   last_key, subtable, has_group, sum_f64, sum_helper, any_true, all_true, max_value,
-                   prepared_interpolation):
+# Provider operations kept by modelx_cython.runtime._native_inputs.
+for _operation in (lookup, first_key, last_key):
     _operation.__modelx_native_operation__ = _operation.__name__
     _operation.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', _operation.__name__)
 
 _native_operations = {function.__name__: function for function in
-                      (lookup, previous, contains, key_count, key_at, first_key,
-                       last_key, subtable, has_group, sum_f64, sum_helper, any_true, all_true, max_value,
+                      (lookup, first_key, last_key, subtable, has_group, sum_f64,
                        prepared_interpolation)}
 
-sum_f64.__modelx_cython_reduction__ = 'f64_sum'
-any_true.__modelx_cython_reduction__ = 'bool_any'
-all_true.__modelx_cython_reduction__ = 'bool_all'
-max_value.__modelx_cython_reduction__ = 'f64_max'
-lookup.__modelx_cython_numeric__ = 'lookup_f64'
-lookup.__modelx_cython_clamped__ = 'lookup_clamped_f64'
-lookup.__modelx_cython_clamped_context__ = 'lookup_clamped_context_f64'
-lookup.__modelx_cython_optional__ = 'optional_lookup_f64'
-lookup.__modelx_cython_grouped__ = ('group_probe', 'group_value', 'group_context_probe')
-lookup.__modelx_cython_bounded__ = 'bounded_lookup_f64'
-previous.__modelx_cython_numeric__ = 'previous_f64'
-
-lookup.__modelx_cython_bound_numeric__ = (
-    'numeric_resource_ready', 'bound_lookup_f64', 'prepare_lookup_f64',
-)
-previous.__modelx_cython_bound_numeric__ = (
-    'numeric_resource_ready', 'bound_previous_f64', 'prepare_previous_f64',
-)
-lookup.__modelx_cython_bound_numeric_namespace__ = 'numeric_binding_ready'
-previous.__modelx_cython_bound_numeric_namespace__ = 'numeric_binding_ready'
-
-lookup.__modelx_cython_bound_bounded__ = 'bound_bounded_f64'
-lookup.__modelx_cython_bound_grouped__ = ('bound_group_probe', 'bound_group_value', 'group_context_value')
 
 # The ordered-key producer is one function, shared with generator consumers.
 from .table_keys import keys
@@ -189,7 +145,7 @@ from .table_keys import keys
 
 # Explicit operations: their .pxd return declarations drive native typing.
 _TYPED_LOOKUP = lookup
-_LOOKUP_INT, _LOOKUP_FLOAT, _LOOKUP_BOOL, _LOOKUP_STR = int, float, bool, str
+_LOOKUP_INT, _LOOKUP_FLOAT = int, float
 def _typed_value(source, key, column=_MISSING, default=_MISSING):
     from .immutable_inputs import Record
     if isinstance(source, Record):
@@ -219,50 +175,12 @@ def lookup_int(source, key, column=_MISSING, default=_MISSING) -> int:
     return result
 
 
-def lookup_bool(source, key, column=_MISSING, default=_MISSING) -> bool:
-    """Read a value using Python bool conversion, including NA errors."""
-    return _LOOKUP_BOOL(_typed_value(source, key, column, default))
-
-
-def lookup_str(source, key, column=_MISSING, default=_MISSING) -> str:
-    """Read a value using Python str conversion."""
-    return _LOOKUP_STR(_typed_value(source, key, column, default))
-
-
-for _operation in (lookup_int, lookup_float, lookup_bool, lookup_str):
-    _operation.__modelx_native_operation__ = _operation.__name__
-    _operation.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', _operation.__name__)
+for _operation in (lookup_int, lookup_float):
     _native_operations[_operation.__name__] = _operation
-
 
 
 def lookup_object(source, key, column=_MISSING, default=_MISSING) -> object:
     """Read the original scalar, including missing sentinels, without conversion."""
     return _typed_value(source, key, column, default)
 
-lookup_object.__modelx_native_operation__ = 'lookup_object'
-lookup_object.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'lookup_object')
 _native_operations['lookup_object'] = lookup_object
-
-
-def is_missing(predicate, value) -> bool:
-    """Test a scalar, preserving the current pandas isna callable explicitly.
-
-    Pass the predicate first so it is resolved before evaluating the value,
-    just as in predicate(value). Noncanonical predicates retain their behavior.
-    """
-    return _LOOKUP_BOOL(predicate(value))
-
-
-is_missing.__modelx_native_operation__ = 'is_missing'
-is_missing.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', 'is_missing')
-_native_operations['is_missing'] = is_missing
-
-# Shared declared-call ABI, owned by the generic compiler helper registry.
-# Physical results describe these .pxd dispatchers, including the existing
-# type-compatible replacement contract; they do not infer callback bodies.
-for _operation, _result in ((lookup_float, 'float64'), (lookup_int, 'int64'),
-                           (lookup_bool, 'bool'), (lookup_str, 'unicode'),
-                           (lookup_object, 'object'), (is_missing, 'bool')):
-    _operation.__modelx_cython_call_layout__ = 'keywords'
-    _operation.__modelx_cython_scalar_result__ = _result

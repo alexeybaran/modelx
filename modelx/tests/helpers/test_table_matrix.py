@@ -571,7 +571,8 @@ def test_legacy_vocabulary_unchanged():
     assert table.lookup(7, 'b') == 7.0
     assert table.contains(20) and not table.contains(2)
     assert table.previous(5, 'a') == 0.3
-    assert pdn.lookup_float(table, 3, 'a') == 0.3
+    from modelx_helpers import typed_inputs
+    assert typed_inputs.lookup_float(table, 3, 'a') == 0.3
     grouped = pdn.table(_frame_f2(), groups=['sex'])
     assert type(grouped) is Record
     rect = pdn.table(_frame_r())

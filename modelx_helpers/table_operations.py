@@ -202,41 +202,7 @@ def to_pandas(value, *, index_name=_MISSING):
     return result
 
 
-def group_sum(table, labels, *, first=(), last=()):
-    """Group by explicit labels, summing flows and selecting nonmissing states.
-
-    First columns lead, then last columns, then summed columns in source order.
-    Ordinary positional labels and pandas Series alignment retain pandas rules.
-    Native compilation admits its declared numeric domains; other inputs keep
-    this reference behavior and remain explicit native-coverage gaps.
-    """
-    import pandas as pd
-    if not isinstance(table, Table):
-        raise TypeError('group_sum requires an owned Table')
-    frame = to_pandas(table)
-    first = (first,) if isinstance(first, str) else tuple(first)
-    last = (last,) if isinstance(last, str) else tuple(last)
-    requested = first + last
-    if len(set(requested)) != len(requested):
-        raise ValueError('first and last columns must be distinct')
-    for name in requested:
-        if name not in table._columns:
-            raise KeyError(name)
-    if isinstance(labels, (tuple, list)):
-        if len(labels) != len(frame):
-            raise ValueError('group labels must match table length')
-        labels = pd.Index(labels)
-    remaining = [name for name in table._columns if name not in requested]
-    out = frame[remaining].groupby(labels).sum()
-    for name in reversed(last):
-        out.insert(0, name, frame[name].groupby(labels).last())
-    for name in reversed(first):
-        out.insert(0, name, frame[name].groupby(labels).first())
-    from .pandas_inputs import table as prepare
-    return prepare(out, report=True)
-
-
-for _function in (row, column, group_sum):
+for _function in (row, column):
     _function.__modelx_native_operation__ = _function.__name__
     _function.__modelx_cython_helper__ = ('modelx_cython.runtime._native_inputs', _function.__name__)
     _function.__modelx_cython_call_layout__ = 'keywords'
