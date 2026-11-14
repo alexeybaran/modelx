@@ -13,6 +13,11 @@ from types import MappingProxyType
 _MISSING = object()
 _RECTANGULAR_STORAGE = object()
 _CONTIGUOUS_STORAGE = object()
+_FRAME_VOCABULARY = 'frame_vocabulary'
+
+# Called with the operation name whenever a table built from a pandas frame (``with_frame``) answers
+# an operation through pandas; set only while the compiler traces a sample (modelx-cython auto-tables).
+FALLBACK_HOOK = None
 
 
 class Record(Mapping):
@@ -37,6 +42,16 @@ class Record(Mapping):
 
     def __getitem__(self, key):
         return self._index[key]
+
+    def __getattr__(self, name):
+        """A public name outside the record vocabulary (``sum``, ``values``, ``tolist``...) is read
+        from a pandas Series of the row, built per access (pandas passthrough, as ``Table`` does)."""
+        if name.startswith('_'):
+            raise AttributeError(name)
+        import pandas as pd
+        if FALLBACK_HOOK is not None:
+            FALLBACK_HOOK('row.' + name)
+        return getattr(pd.Series(dict(self._items)), name)
 
     def lookup_enum(self, key, enum_type, *, default=_MISSING):
         """Resolve a stored label to its enum member with an optional default."""
@@ -187,6 +202,8 @@ class Table(Mapping):
         if name not in ('_keys', '_values', '_positions', '_ordered'):
             if name.startswith('_'):
                 raise AttributeError(name)
+            if FALLBACK_HOOK is not None and _frame_of(self) is not None:
+                FALLBACK_HOOK('T.' + name)
             return getattr(_pandas_frame(self).copy(deep=False), name)
         from itertools import product
 
@@ -225,6 +242,11 @@ class Table(Mapping):
         raise AttributeError('immutable input')
 
     def __getitem__(self, key):
+        frame = _frame_of(self)
+        if frame is not None:                    # a frame-built table: pandas meaning, T["c"] a Series
+            if type(key) is str and key in self._columns:
+                return _column_series(self, frame, key)
+            return _fallback(self, 'T[...]')[key]
         if key == 'keys':
             return self._keys
         if key == 'values':
@@ -236,10 +258,41 @@ class Table(Mapping):
         raise KeyError(key)
 
     def __iter__(self):
+        if _frame_of(self) is not None:
+            return iter(_fallback(self, 'iter(T)'))
         return iter(('keys', 'values', 'columns'))
 
     def __len__(self):
+        if _frame_of(self) is not None:
+            return len(_fallback(self, 'len(T)'))
         return 3
+
+    def __contains__(self, key):
+        if _frame_of(self) is not None:
+            return key in _fallback(self, 'c in T')
+        return Mapping.__contains__(self, key)
+
+    def keys(self):
+        if _frame_of(self) is not None:
+            return _fallback(self, 'T.keys').keys()
+        return Mapping.keys(self)
+
+    def items(self):
+        if _frame_of(self) is not None:
+            return _fallback(self, 'T.items').items()
+        return Mapping.items(self)
+
+    def get(self, key, default=None):
+        if _frame_of(self) is not None:
+            return _fallback(self, 'T.get').get(key, default)
+        return Mapping.get(self, key, default)
+
+    @property
+    def values(self):
+        """``DataFrame.values`` on a frame-built table; the Mapping method otherwise."""
+        if _frame_of(self) is not None:
+            return _fallback(self, 'T.values').values
+        return Mapping.values.__get__(self)
 
     def lookup(self, key, column):
         if (isinstance(column, str) and self._index_error is not None
@@ -410,6 +463,13 @@ class Table(Mapping):
         return iter(rows)
 
     def __reduce__(self):
+        frame = _frame_of(self)
+        if frame is not None:       # a plain DataFrame copy: the read-only subclass is the compiler's
+            import pandas as pd
+            return _restore_frame_table, (self.__reduce_plain__(), pd.DataFrame(frame, copy=True))
+        return self.__reduce_plain__()
+
+    def __reduce_plain__(self):
         args = (self._keys, self._values, self._columns)
         if self._index_error is not None:
             args += (self._index_error,)
@@ -430,6 +490,11 @@ def _restore_record(cls, values, metadata, preserve_scalar_types=False):
     result = cls(values, preserve_scalar_types=preserve_scalar_types) if preserve_scalar_types else cls(values)
     object.__setattr__(result, '_metadata', metadata)
     return result
+
+
+def _restore_frame_table(reduced, frame):
+    function, args = reduced
+    return with_frame(function(*args), frame)
 
 
 def _restore_table(cls, args, metadata, preserve_scalar_types=False):
@@ -888,6 +953,9 @@ def _sub_table(table, item, prefix, levels):
                           tuple(values[p] for p in positions), table._columns, spec,
                           table._preserve_scalar_types)
         object.__setattr__(child, '_metadata', _child_metadata(table, tuple(positions), count))
+    frame = _frame_of(table)
+    if frame is not None:
+        with_frame(child, frame.loc[item])
     return children.setdefault(prefix, child)
 
 
@@ -1300,3 +1368,79 @@ def table_schema(table):
         values = table._values
         column_kinds = {name: _common_kind(row[i] for row in values) for i, name in enumerate(columns)}
     return {'storage': storage[0], 'rows': _row_count(table), 'keys': keys, 'columns': column_kinds}
+
+
+# ---------------------------------------------------------------- tables built from a pandas frame
+def with_frame(table, frame):
+    """Give ``table`` the pandas vocabulary of ``frame``, a DataFrame holding the same data.
+
+    Used by modelx-cython when it admits a plain pandas frame as a table (auto-tables): the
+    reads the Table vocabulary answers (``loc[key, "col"]``, ``loc[key]``, ``loc[prefix]``,
+    ``at``, ``index``, ``iterrows``) keep their typed results; every other operation is answered
+    by pandas on ``frame`` (handed out as a copy-on-write copy, so it cannot change): masks,
+    label slices and lists, a prefix key with a column, ``len``, iteration and ``in`` over the
+    columns, ``.values``, ``keys``/``items``/``get``, ``T["c"]`` (a pandas Series) and every
+    other DataFrame attribute. ``frame`` is not copied: the caller passes one it owns.
+    Tables built by ``pdn.table`` keep the Mapping vocabulary (D35).
+    """
+    cache = table._native_cache
+    cache['pandas_frame'] = frame
+    cache[_FRAME_VOCABULARY] = True
+    return table
+
+
+def table_frame(table):
+    """The DataFrame of a table built with ``with_frame``, else None."""
+    return _frame_of(table)
+
+
+def _frame_of(table):
+    try:
+        cache = object.__getattribute__(table, '_native_cache')
+    except AttributeError:
+        return None
+    return cache.get('pandas_frame') if cache.get(_FRAME_VOCABULARY) else None
+
+
+def _fallback(table, operation):
+    """The frame of a frame-built table for an operation the Table vocabulary does not answer."""
+    if FALLBACK_HOOK is not None:
+        FALLBACK_HOOK(operation)
+    return _frame_of(table).copy(deep=False)
+
+
+def _column_series(table, frame, column):
+    series = table._native_cache.get(('column_series', column))
+    if series is None:
+        series = table._native_cache.setdefault(('column_series', column), frame[column])
+    return series.copy(deep=False)
+
+
+def _with_pandas_fallback(cls, attribute):
+    """``loc``/``at`` forms the Table refuses or does not hold (a prefix key with a column, label
+    slices, lists, boolean masks) are answered by pandas on a frame-built table; a missing key
+    then raises pandas' own error, as live does. Other tables keep the Table's errors."""
+    native = cls.__getitem__
+
+    def __getitem__(self, item):
+        frame = _frame_of(self._table)
+        if frame is None:
+            return native(self, item)
+        if _pandas_selector(item):
+            return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
+        try:
+            return native(self, item)
+        except (KeyError, TypeError, ValueError, IndexError):
+            return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
+    __getitem__.__doc__ = native.__doc__
+    cls.__getitem__ = __getitem__
+
+
+def _pandas_selector(item):
+    """Whether a ``loc`` item selects by slice, list, array or mask (never a Table key)."""
+    parts = item if type(item) is tuple else (item,)
+    return any(type(part) in (slice, list) or getattr(part, 'ndim', 0) > 0 for part in parts)
+
+
+_with_pandas_fallback(_TableLoc, 'loc')
+_with_pandas_fallback(_TableAt, 'at')

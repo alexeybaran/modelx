@@ -6,7 +6,7 @@ selection has direct Cython provider declarations, without formula recognition.
 from copy import deepcopy
 from types import MappingProxyType
 
-from .immutable_inputs import Table, Record, _copy_container, _index_key, _valid_index_key
+from .immutable_inputs import Table, Record, _copy_container, _index_key, _valid_index_key, table_frame
 
 _MISSING = object()
 
@@ -162,6 +162,9 @@ def to_pandas(value, *, index_name=_MISSING):
             value = owner()
     if not isinstance(value, (Table, Record)):
         raise TypeError('to_pandas requires an owned Table or Record')
+    frame = table_frame(value) if isinstance(value, Table) else None
+    if frame is not None:       # a table admitted from a pandas frame: that frame (copy-on-write copy)
+        return frame.copy(deep=False)
 
     meta = value._metadata
     kind = meta[0] if meta is not None else None
