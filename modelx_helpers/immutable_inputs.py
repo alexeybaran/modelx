@@ -105,7 +105,7 @@ class _TableIndex:
 class Table(Mapping):
     __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
                              'owned-table-1', 'modelx_helpers.immutable_inputs.Table')
-    __slots__ = ('_keys', '_values', '_columns', '_positions', '_ordered', '_native_cache', '_index_error', '_metadata', '_preserve_scalar_types')
+    __slots__ = ('_keys', '_values', '_columns', '_positions', '_ordered', '_native_cache', '_index_error', '_metadata', '_preserve_scalar_types', '_storage_form')
 
     def __init__(self, keys, values, columns, index_error=None, *, preserve_scalar_types=False):
         keys, columns = tuple(keys), tuple(columns)
@@ -525,40 +525,42 @@ def _valid_index_key(key, spec):
 # ``_ordered`` of a compact table. The legacy methods above are unchanged.
 
 def _storage_of(table):
-    """The table's storage form, fixed at construction and kept in ``_native_cache``:
+    """The table's storage form, fixed at construction and kept in the ``_storage_form`` slot:
     ``('contiguous', start, data, plain, levels)``,
     ``('rectangular', axes, data, positions, plain, levels)`` or ``('rows', plain, levels)``.
     ``plain``: an int or str key needs no pandas label-mode check (no bool-only level).
+    ``_native_cache`` is left to the compiler (D51). The slot is filled on first use; threads
+    reading one shared table may both compute it, but the form follows from immutable fields,
+    so either equal value may be kept (a benign, idempotent write).
     """
+    try:
+        return object.__getattribute__(table, '_storage_form')
+    except AttributeError:
+        pass
     cache = table._native_cache
-    form = cache.get(_STORAGE_FORM)
-    if form is None:
-        contiguous = cache.get(_CONTIGUOUS_STORAGE)
-        rectangular = cache.get(_RECTANGULAR_STORAGE)
-        spec = table._index_error
-        if spec is not None:
-            levels = len(spec['boolean_modes']) if spec['multi'] else 1
-            plain = not spec['multi'] and spec['boolean_modes'][0] != 1
-        else:
-            plain = True
-            if contiguous is not None:
-                levels = 1
-            elif rectangular is not None:
-                levels = len(rectangular[0])
-            else:
-                keys = table._keys
-                levels = len(keys[0]) if keys and type(keys[0]) is tuple else 1
+    contiguous = cache.get(_CONTIGUOUS_STORAGE)
+    rectangular = cache.get(_RECTANGULAR_STORAGE)
+    spec = table._index_error
+    if spec is not None:
+        levels = len(spec['boolean_modes']) if spec['multi'] else 1
+        plain = not spec['multi'] and spec['boolean_modes'][0] != 1
+    else:
+        plain = True
         if contiguous is not None:
-            form = ('contiguous', contiguous[0], contiguous[1], plain, levels)
+            levels = 1
         elif rectangular is not None:
-            form = ('rectangular', *rectangular, plain, levels)
+            levels = len(rectangular[0])
         else:
-            form = ('rows', plain, levels)
-        form = cache.setdefault(_STORAGE_FORM, form)
+            keys = table._keys
+            levels = len(keys[0]) if keys and type(keys[0]) is tuple else 1
+    if contiguous is not None:
+        form = ('contiguous', contiguous[0], contiguous[1], plain, levels)
+    elif rectangular is not None:
+        form = ('rectangular', *rectangular, plain, levels)
+    else:
+        form = ('rows', plain, levels)
+    object.__setattr__(table, '_storage_form', form)
     return form
-
-
-_STORAGE_FORM = object()
 
 
 def _row_count(table):
