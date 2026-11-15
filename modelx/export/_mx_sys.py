@@ -400,22 +400,31 @@ def _mx_collect_policy_outputs(base, coords, loop_name, names, args):
     from ._mx_collect_semantics import prepare_output
 
     scratch = {}
+    # A compiled class may offer the construction and release its own collect evaluator and items use
+    # (modelx-cython D116): the root is then built and freed the same way on every collect path.
+    shared_root = getattr(base, '_mx_collect_new_root', None)
     try:
         for coordinate in coords:
             values = dict(zip(names, args))
             values[loop_name] = coordinate
-            root = base.__class__(base)
+            root = shared_root() if shared_root is not None else None
+            shared = root is not None
             releases = []
             complete = False
             try:
-                spaces = list(zip(root._mx_walk(), base._mx_walk()))
-                for space, template in spaces:
-                    space._mx_copy_refs(template, base)
-                    for previous_root in base._mx_roots:
-                        previous_root._mx_copy_params(space)
-                    base._mx_assign_params(space, **values)
-                    space._mx_roots.extend(base._mx_roots)
-                    space._mx_roots.append(root)
+                if shared:
+                    base._mx_assign_params(root, **values)
+                    spaces = [(root, base)]
+                else:
+                    root = base.__class__(base)
+                    spaces = list(zip(root._mx_walk(), base._mx_walk()))
+                    for space, template in spaces:
+                        space._mx_copy_refs(template, base)
+                        for previous_root in base._mx_roots:
+                            previous_root._mx_copy_params(space)
+                        base._mx_assign_params(space, **values)
+                        space._mx_roots.extend(base._mx_roots)
+                        space._mx_roots.append(root)
                 apply_formula = getattr(root, '_mx_apply_formula', None)
                 if apply_formula is not None:
                     apply_formula(**values)
@@ -438,6 +447,8 @@ def _mx_collect_policy_outputs(base, coords, loop_name, names, args):
                             cleanup_error = error
                 if not complete or cleanup_error is not None:
                     scratch.clear()
+                if shared:
+                    base._mx_collect_release_root(root)
                 if complete and cleanup_error is not None:
                     raise cleanup_error
             del root
