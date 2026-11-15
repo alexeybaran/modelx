@@ -243,7 +243,7 @@ class Table(Mapping):
         raise AttributeError('immutable input')
 
     def __getitem__(self, key):
-        frame = _frame_of(self)
+        frame = _frame_of(self) if self._native_cache.get(_FRAME_VOCABULARY) else None
         if frame is not None:                    # a frame-built table: pandas meaning, T["c"] a Series
             if type(key) is str and key in self._columns:
                 return _column_series(self, frame, key)
@@ -259,17 +259,17 @@ class Table(Mapping):
         raise KeyError(key)
 
     def __iter__(self):
-        if _frame_of(self) is not None:
+        if self._native_cache.get(_FRAME_VOCABULARY):
             return iter(_fallback(self, 'iter(T)'))
         return iter(('keys', 'values', 'columns'))
 
     def __len__(self):
-        if _frame_of(self) is not None:
+        if self._native_cache.get(_FRAME_VOCABULARY):
             return len(_fallback(self, 'len(T)'))
         return 3
 
     def __contains__(self, key):
-        if _frame_of(self) is not None:
+        if self._native_cache.get(_FRAME_VOCABULARY):
             return key in _fallback(self, 'c in T')
         return Mapping.__contains__(self, key)
 
@@ -437,12 +437,12 @@ class Table(Mapping):
     @property
     def loc(self):
         """Pandas-spelled label reads; see :class:`_TableLoc`."""
-        return _TableLoc(self)
+        return _FrameLoc(self) if self._native_cache.get(_FRAME_VOCABULARY) else _TableLoc(self)
 
     @property
     def at(self):
         """Scalar label reads with pandas ``.at`` spelling: ``table.at[key, "col"]``."""
-        return _TableAt(self)
+        return _FrameAt(self) if self._native_cache.get(_FRAME_VOCABULARY) else _TableAt(self)
 
     def iterrows(self):
         """``(label, row)`` pairs in row order, like ``DataFrame.iterrows()`` without pandas.
@@ -1424,14 +1424,12 @@ def _column_series(table, frame, column):
 
 
 def _with_pandas_fallback(cls, attribute):
-    """``loc``/``at`` forms the Table refuses or does not hold (a prefix key with a column, label
-    slices, lists, boolean masks) are answered by pandas on a frame-built table; a missing key
-    then raises pandas' own error, as live does. Other tables keep the Table's errors."""
+    """The ``loc``/``at`` indexer of a frame-built table: forms the Table refuses or does not hold (a prefix
+    key with a column, label slices, lists, boolean masks) are answered by pandas on the frame; a missing key
+    then raises pandas' own error, as live does. Tables built by pdn.table keep the plain indexer (no cost)."""
     native = cls.__getitem__
 
     def __getitem__(self, item):
-        if _frame_of(self._table) is None:
-            return native(self, item)
         if type(item) in _LABELS:       # one label: the Table's read; a row remembers its frame row (D119)
             return _remember_row(native(self, item), self._table, item, attribute)
         if _pandas_selector(item):
@@ -1442,7 +1440,7 @@ def _with_pandas_fallback(cls, attribute):
             return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
         return _remember_row(result, self._table, item, attribute)
     __getitem__.__doc__ = native.__doc__
-    cls.__getitem__ = __getitem__
+    return type('_Frame' + cls.__name__.lstrip('_'), (cls,), {'__slots__': (), '__getitem__': __getitem__})
 
 
 _LABELS = (int, float, str, bool)
@@ -1473,8 +1471,8 @@ def _pandas_selector(item):
     return any(type(part) in (slice, list) or getattr(part, 'ndim', 0) > 0 for part in parts)
 
 
-_with_pandas_fallback(_TableLoc, 'loc')
-_with_pandas_fallback(_TableAt, 'at')
+_FrameLoc = _with_pandas_fallback(_TableLoc, 'loc')
+_FrameAt = _with_pandas_fallback(_TableAt, 'at')
 
 
 def _table_operator(name):
