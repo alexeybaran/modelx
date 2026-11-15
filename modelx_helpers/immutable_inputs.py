@@ -24,7 +24,7 @@ FALLBACK_HOOK = None
 class Record(Mapping):
     __modelx_cython_type__ = (1, 'modelx_cython.runtime._native_inputs',
                              'owned-table-1', 'modelx_helpers.immutable_inputs.Record')
-    __slots__ = ('_items', '_index', '_native_groups', '_metadata', '_preserve_scalar_types')
+    __slots__ = ('_items', '_index', '_native_groups', '_metadata', '_preserve_scalar_types', '_frame_row')
 
     def __init__(self, values, *, preserve_scalar_types=False):
         items = (tuple(values.items()) if preserve_scalar_types else
@@ -1430,19 +1430,41 @@ def _with_pandas_fallback(cls, attribute):
     native = cls.__getitem__
 
     def __getitem__(self, item):
-        if type(item) in _LABELS or _frame_of(self._table) is None:     # one label: the Table's read
+        if _frame_of(self._table) is None:
             return native(self, item)
+        if type(item) in _LABELS:       # one label: the Table's read; a row remembers its frame row (D119)
+            return _remember_row(native(self, item), self._table, item, attribute)
         if _pandas_selector(item):
             return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
         try:
-            return native(self, item)
+            result = native(self, item)
         except (KeyError, TypeError, ValueError, IndexError):
             return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
+        return _remember_row(result, self._table, item, attribute)
     __getitem__.__doc__ = native.__doc__
     cls.__getitem__ = __getitem__
 
 
 _LABELS = (int, float, str, bool)
+
+
+def _remember_row(result, table, item, attribute):
+    """A Record read as ``T.loc[key]`` from a frame-built table keeps how to make the pandas row
+    (``frame.loc[key]``) for a Python caller (D119); other results are returned as they are."""
+    if attribute == 'loc' and type(result) is Record:
+        object.__setattr__(result, '_frame_row', (lambda: _frame_of(table).loc[item], None))
+    return result
+
+
+def record_row(record):
+    """``(make the pandas row, the read-only row already made or None)`` of a Record read from a
+    frame-built table, else None (D119; see modelx_cython.runtime.table_cells.row_series)."""
+    if type(record) is not Record:
+        return None
+    try:
+        return object.__getattribute__(record, '_frame_row')
+    except AttributeError:
+        return None
 
 
 def _pandas_selector(item):
