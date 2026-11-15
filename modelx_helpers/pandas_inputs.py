@@ -62,6 +62,14 @@ def _keys_from_index(index):
     return [_key(label) for label in index], False
 
 
+def _plain_frame(value):
+    """A table built from a frame (auto-tables: the compiler admitted a cell's DataFrame) stands for that
+    frame: ``pdn.table(cell())`` gives what it gives on the DataFrame. Other values are returned as they are."""
+    from .immutable_inputs import Table, table_frame
+    source = table_frame(value) if isinstance(value, Table) else None
+    return value if source is None else pd.DataFrame(source)
+
+
 def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=False,
           preserve_scalar_types=False):
     """Build an existing Table, optionally nested in explicit group Records.
@@ -91,6 +99,7 @@ def table(frame, *, columns=None, groups=(), indexing='loc', rows=False, report=
     Only the structure is owned: mutable object cells retain pandas' shallow
     identity. Keys, dimensions and uniqueness are still validated eagerly.
     """
+    frame = _plain_frame(frame)
     if not isinstance(frame, pd.DataFrame):
         raise TypeError('table requires a pandas DataFrame')
     if indexing not in ('loc', 'at'):
@@ -388,6 +397,7 @@ def _report_metadata(frame, *, rows, preserve_scalar_types):
 
 def records(frame):
     """Prepare owned row Records keyed by the frame index, without row coercion."""
+    frame = _plain_frame(frame)
     if not isinstance(frame, pd.DataFrame):
         raise TypeError('records requires a pandas DataFrame')
     if not frame.index.is_unique:
