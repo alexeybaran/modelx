@@ -148,15 +148,8 @@ class BaseSpace(BaseParent):
             space._mx_clear_values()
 
     def _mx_clear_values(self):
-        """Empty this Space's caches and drop its ItemSpaces (a compiled class generates its own)."""
-        lock = getattr(self, '_mx_lock', None)
-        if lock is not None:
-            with lock:
-                self._mx_clear_caches()
-        else:
-            self._mx_clear_caches()
-
-    def _mx_clear_caches(self):
+        """Empty this Space's caches and drop its ItemSpaces (a compiled class generates its own). Not
+        synchronised with calculations running in other threads, as live modelx's clear is not."""
         for name in getattr(sys.modules[self.__class__.__module__], "_v_cells_names_" + self._name):
             if hasattr(self, "_has_" + name):
                 setattr(self, "_v_" + name, None)
