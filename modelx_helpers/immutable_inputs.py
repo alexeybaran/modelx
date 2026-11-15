@@ -14,6 +14,7 @@ _MISSING = object()
 _RECTANGULAR_STORAGE = object()
 _CONTIGUOUS_STORAGE = object()
 _FRAME_VOCABULARY = 'frame_vocabulary'
+_FRAME_SOURCE = 'frame_source'
 
 # Called with the operation name whenever a table built from a pandas frame (``with_frame``) answers
 # an operation through pandas; set only while the compiler traces a sample (modelx-cython auto-tables).
@@ -953,9 +954,9 @@ def _sub_table(table, item, prefix, levels):
                           tuple(values[p] for p in positions), table._columns, spec,
                           table._preserve_scalar_types)
         object.__setattr__(child, '_metadata', _child_metadata(table, tuple(positions), count))
-    frame = _frame_of(table)
-    if frame is not None:
-        with_frame(child, frame.loc[item])
+    if table._native_cache.get(_FRAME_VOCABULARY):     # the child's frame is made only if pandas needs it
+        child._native_cache[_FRAME_VOCABULARY] = True
+        child._native_cache[_FRAME_SOURCE] = (table, item)
     return children.setdefault(prefix, child)
 
 
@@ -1399,7 +1400,13 @@ def _frame_of(table):
         cache = object.__getattribute__(table, '_native_cache')
     except AttributeError:
         return None
-    return cache.get('pandas_frame') if cache.get(_FRAME_VOCABULARY) else None
+    if not cache.get(_FRAME_VOCABULARY):
+        return None
+    frame = cache.get('pandas_frame')
+    if frame is None:       # a sub-table of a frame-built table: its parent's frame.loc[prefix], once
+        parent, item = cache[_FRAME_SOURCE]
+        frame = cache.setdefault('pandas_frame', _frame_of(parent).loc[item])
+    return frame
 
 
 def _fallback(table, operation):
@@ -1423,8 +1430,7 @@ def _with_pandas_fallback(cls, attribute):
     native = cls.__getitem__
 
     def __getitem__(self, item):
-        frame = _frame_of(self._table)
-        if frame is None:
+        if type(item) in _LABELS or _frame_of(self._table) is None:     # one label: the Table's read
             return native(self, item)
         if _pandas_selector(item):
             return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
@@ -1434,6 +1440,9 @@ def _with_pandas_fallback(cls, attribute):
             return getattr(_fallback(self._table, attribute + '[...]'), attribute)[item]
     __getitem__.__doc__ = native.__doc__
     cls.__getitem__ = __getitem__
+
+
+_LABELS = (int, float, str, bool)
 
 
 def _pandas_selector(item):
