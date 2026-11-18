@@ -1187,8 +1187,17 @@ class _TableIndex:
         return _row_count(self._table)
 
     def __getitem__(self, i):
-        """``index[i]``: the i-th label in row order; negative i counts from the end."""
-        if type(i) is bool or not hasattr(type(i), '__index__'):
+        """``index[i]``: the i-th label in row order; negative i counts from the end.
+
+        Any key that is not one integer (a slice, a boolean or integer array or list, a
+        bool) selects on the pandas index, as pandas does. An array type has ``__index__``
+        but raises for more than one element, so the key is tested, not its type."""
+        if type(i) is bool:
+            return self._pandas_index()[i]
+        from operator import index as as_index
+        try:
+            as_index(i)
+        except TypeError:
             return self._pandas_index()[i]
         table = self._table
         size = _row_count(table)

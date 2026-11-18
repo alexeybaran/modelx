@@ -248,6 +248,26 @@ def test_square(form, op):
     _check_not_expanded(table, compact)
 
 
+@pytest.mark.parametrize('form', sorted({form for form, _ in TESTED}))
+def test_index_selection_is_the_pandas_selection(form):
+    """``index[key]`` for a selection key (boolean array or list, integer array, slice) is
+    the pandas index selection: same type, labels, names and dtype (it reads the pandas
+    index, so compact storage expands, as for the other reads on the pandas index)."""
+    frame, table, _ = _build(form)
+    n = len(frame.index)
+    mask = np.arange(n) % 2 == 1
+    for key in (mask, ~mask, list(mask), np.array([n - 1, 0]), np.array([], dtype=np.intp),
+                slice(1, None), slice(None, None, -2)):
+        try:
+            expected = frame.index[key]
+        except Exception:     # noqa: BLE001 - the same exception type and arguments
+            assert outcome(lambda: table.index[key]) == outcome(lambda: frame.index[key]), key
+            continue
+        selected = table.index[key]
+        assert type(selected) is type(expected) and selected.equals(expected), key
+        assert selected.names == expected.names and selected.dtype == expected.dtype, key
+
+
 def _row_form_difference(table, key):
     """D27b: a complete tuple key raises KeyError(key) in the helper."""
     with pytest.raises(KeyError) as error:
