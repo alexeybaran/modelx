@@ -207,42 +207,6 @@ class CollectResult:
         return 'CollectResult(%s)' % ', '.join(self._fields)
 
 
-def _mx_collect_sum(old, new, path):
-    if type(new) is dict:
-        if old is None:
-            old = {name: None for name in new}
-        elif type(old) is not dict or tuple(old) != tuple(new):
-            raise ValueError('collect output structure changed at ' + repr(path))
-        for name, value in new.items():
-            old[name] = _mx_collect_sum(old[name], value, path + (name,))
-        return old
-    if type(old) is dict:
-        raise ValueError('collect output structure changed at ' + repr(path))
-    if old is None:
-        return new
-    try:
-        return old + new
-    except Exception as exc:
-        raise TypeError('collect sum value cannot be added at ' + repr(path)) from exc
-
-
-def _mx_collect_shape(value):
-    if type(value) is dict:
-        return {name: _mx_collect_shape(item) for name, item in value.items()}
-    return None
-
-
-def _mx_collect_check_shape(expected, value, path):
-    if expected is None:
-        if type(value) is dict:
-            raise ValueError('collect output structure changed at ' + repr(path))
-        return
-    if type(value) is not dict or tuple(value) != tuple(expected):
-        raise ValueError('collect output structure changed at ' + repr(path))
-    for name, item in value.items():
-        _mx_collect_check_shape(expected[name], item, path + (name,))
-
-
 _mx_collect_adapter_version = 2
 
 
@@ -324,6 +288,8 @@ def _mx_collect_parallel(base, coords, loop_name, names, args, private, private_
     workers = min(workers, len(coords))
     if private is None:
         return _mx_collect_ordered(base, coords, loop_name, names, args, workers)
+    from ._mx_collect_semantics import _add, _check_shape, _shape
+
     chunks = [coords[i * len(coords) // workers:(i + 1) * len(coords) // workers]
               for i in range(workers)]
     result = None
@@ -352,12 +318,13 @@ def _mx_collect_parallel(base, coords, loop_name, names, args, private, private_
                 if mode == 'individual':
                     for coordinate, item in values.items():
                         if individual_shape is None:
-                            individual_shape = _mx_collect_shape(item._fields)
+                            individual_shape = _shape(item._fields)
                         else:
-                            _mx_collect_check_shape(individual_shape, item._fields, (mode,))
+                            _check_shape(individual_shape, item._fields, (mode,))
                         result[mode][coordinate] = item
                 else:
-                    result[mode] = _mx_collect_sum(result[mode], values._fields, (mode,))
+                    current = result[mode]
+                    result[mode] = values._fields if current is None else _add(current, values._fields, (mode,))
     return CollectResult({mode: value if mode == 'individual' else CollectResult(value)
                           for mode, value in result.items()})
 
