@@ -268,6 +268,48 @@ def test_index_selection_is_the_pandas_selection(form):
         assert selected.names == expected.names and selected.dtype == expected.dtype, key
 
 
+
+def _same_result(table_read, frame_read, what):
+    """The table's read gives the pandas read's result (type and values) or its exception."""
+    try:
+        expected = frame_read()
+    except Exception:     # noqa: BLE001 - the same exception type and arguments
+        assert outcome(table_read) == outcome(frame_read), what
+        return
+    got = table_read()
+    assert type(got) is type(expected), (what, type(got), type(expected))
+    if isinstance(expected, pd.Index):
+        assert got.equals(expected) and got.dtype == expected.dtype and got.names == expected.names, what
+    elif isinstance(expected, np.ndarray):
+        assert got.dtype == expected.dtype and np.array_equal(got, expected), what
+    else:
+        assert got == expected, what
+
+
+@pytest.mark.parametrize('form', sorted({form for form, _ in TESTED}))
+def test_index_operators_are_the_pandas_operators(form):
+    """Operations the index does not implement natively (arithmetic, comparison, the numpy
+    protocol) give the pandas index's result of the same frame, type included (upstream
+    _US_SEC: ``rows.index + 2``)."""
+    import operator
+    frame, table, _ = _build(form)
+    label = frame.index[0]
+    array = np.arange(len(frame.index))
+    binary = [operator.add, operator.sub, operator.mul, operator.truediv, operator.floordiv,
+              operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne]
+    for op in binary:
+        for other in (2, 0.5, label, array):
+            _same_result(lambda: op(table.index, other), lambda: op(frame.index, other), (op, other))
+            _same_result(lambda: op(other, table.index), lambda: op(other, frame.index), (other, op))
+        _same_result(lambda: op(table.index, table.index), lambda: op(frame.index, frame.index), (op, 'self'))
+    for op in (operator.neg, abs):
+        _same_result(lambda: op(table.index), lambda: op(frame.index), op)
+    _same_result(lambda: np.asarray(table.index), lambda: np.asarray(frame.index), 'asarray')
+    _same_result(lambda: np.add(table.index, 1), lambda: np.add(frame.index, 1), 'ufunc')
+    # native reads unchanged: index[i], len, membership, iteration
+    assert table.index[0] == frame.index[0] and len(table.index) == len(frame.index)
+    assert label in table.index and list(table.index) == [_norm(k) for k in frame.index]
+
 def _row_form_difference(table, key):
     """D27b: a complete tuple key raises KeyError(key) in the helper."""
     with pytest.raises(KeyError) as error:

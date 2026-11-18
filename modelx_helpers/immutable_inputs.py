@@ -1282,6 +1282,49 @@ class _TableIndex:
         return getattr(self._pandas_index(), name)
 
 
+
+def _pandas_operand(value):
+    return value._pandas_index() if isinstance(value, _TableIndex) else value
+
+
+def _index_operator(name):
+    def operator(self, *args):
+        return getattr(self._pandas_index(), name)(*map(_pandas_operand, args))
+    operator.__name__ = name
+    operator.__doc__ = f'pandas ``Index.{name}`` on the materialised index (passthrough).'
+    return operator
+
+
+# Operators the index does not implement natively (arithmetic, comparison, logical) give the
+# result of the pandas index of the same frame, type included; the native reads above
+# (in, len, iteration, index[i], min, max, asof, searchsorted) are unchanged. Hashing keeps
+# object identity, as before (a pandas Index is not hashable).
+for _name in ('__lt__', '__le__', '__gt__', '__ge__', '__eq__', '__ne__',
+              '__add__', '__radd__', '__sub__', '__rsub__', '__mul__', '__rmul__',
+              '__truediv__', '__rtruediv__', '__floordiv__', '__rfloordiv__', '__mod__', '__rmod__',
+              '__divmod__', '__rdivmod__', '__pow__', '__rpow__', '__and__', '__rand__',
+              '__or__', '__ror__', '__xor__', '__rxor__', '__neg__', '__pos__', '__abs__', '__invert__'):
+    setattr(_TableIndex, _name, _index_operator(_name))
+del _name
+_TableIndex.__hash__ = object.__hash__
+
+
+def _index_array(self, dtype=None, copy=None):
+    """numpy protocol: the array of the pandas index (``np.asarray(T.index)``)."""
+    return self._pandas_index().__array__(dtype=dtype, copy=copy)
+
+
+def _index_array_ufunc(self, ufunc, method, *inputs, **kwargs):
+    """numpy ufuncs on the index give the pandas index's result (an Index, as pandas)."""
+    inputs = tuple(map(_pandas_operand, inputs))
+    if 'out' in kwargs:
+        kwargs['out'] = tuple(map(_pandas_operand, kwargs['out']))
+    return getattr(ufunc, method)(*inputs, **kwargs)
+
+
+_TableIndex.__array__ = _index_array
+_TableIndex.__array_ufunc__ = _index_array_ufunc
+
 # ---------------------------------------------------------------------------
 # Contracts for the compiler (round 3, W1.H). Neither expands compact storage.
 
