@@ -16,6 +16,13 @@ Anaconda users should use the ``conda`` command instead::
 Enhancements
 ============
 
+* :attr:`Model.collect_workers <modelx.core.model.Model.collect_workers>` sets the
+  number of worker threads ``collect()`` may use, the same way on a live, an
+  exported and a compiled model (``model.collect_workers = 4``; :obj:`None`
+  restores the default). With 1 worker, ``collect()`` evaluates the items one
+  after another as before; the result is the same for any number of workers.
+  Live modelx and builds with the GIL evaluate serially.
+
 * Tools can tell what a value is from the name of its class
   (:ref:`toolapi-kinds`). A tool first checks that
   ``type(v).__module__`` is a str that starts with ``"modelx."``,

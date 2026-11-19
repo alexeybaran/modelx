@@ -9,6 +9,12 @@ import modelx as mx
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def free_threaded(monkeypatch):
+    # These tests exercise the parallel paths; on a GIL build collect would clamp to one worker.
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+
+
 @pytest.mark.parametrize('workers,ordered,expected', [(1, False, 10.0), (4, False, 8.0), (4, True, 9.0)])
 def test_optional_native_adapter_order_cache_and_retry(monkeypatch, workers, ordered, expected):
     from concurrent import futures
@@ -115,7 +121,7 @@ def test_exported_parallel_collect_order_retry_and_shared_lock(tmp_path, monkeyp
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
         package = import_module(name)
-        package.mx_model._mx_collect_set_workers_v2(workers)
+        package.mx_model.collect_workers = workers
         policies = package.mx_model.Policies
         shared_calls = []
         package.mx_model.Shared.callback = lambda n: shared_calls.append(n) or n
@@ -170,7 +176,7 @@ def test_exported_parallel_shape_error_precedes_later_formula_error(tmp_path, mo
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
         package = import_module(name)
-        package.mx_model._mx_collect_set_workers_v2(workers)
+        package.mx_model.collect_workers = workers
         with pytest.raises(ValueError, match='modes changed'):
             package.mx_model.Policies.collect()
         assert not package.mx_model.Policies._mx_collect_cache
@@ -200,7 +206,7 @@ def test_generic_parallel_collect_adds_in_policy_order(tmp_path, monkeypatch, wo
     try:
         package = import_module(name)
         assert name + '._mx_collect_semantics' in sys.modules
-        package.mx_model._mx_collect_set_workers_v2(workers)
+        package.mx_model.collect_workers = workers
         result = package.mx_model.Policies.collect()
         assert result.sum.total == 1.0
         assert tuple(result.individual) == keys
@@ -208,3 +214,70 @@ def test_generic_parallel_collect_adds_in_policy_order(tmp_path, monkeypatch, wo
         for module in tuple(sys.modules):
             if module == name or module.startswith(name + '.'):
                 del sys.modules[module]
+
+
+def _exported(tmp_path, name):
+    model = mx.new_model(name)
+    try:
+        keys = tuple(range(6))
+        space = model.new_space('Policies', formula='lambda key: None', refs={'keys': keys},
+                                collect_over={'key': keys},
+                                collect_outputs='lambda: {"sum": {"value": value()}}')
+        space.new_cells('value', 'lambda: float(key) * 1.5')
+        model.export(tmp_path / name)
+    finally:
+        model.close()
+    return name
+
+
+def test_collect_workers_property_live_and_exported(tmp_path, monkeypatch):
+    model = mx.new_model('WorkersLive')
+    try:
+        assert model.collect_workers is None
+        model.collect_workers = 4
+        assert model.collect_workers == 4
+        for bad in (0, -1, True, 2.0, '2'):
+            with pytest.raises(ValueError):
+                model.collect_workers = bad
+        assert model.collect_workers == 4
+        model.collect_workers = None
+        assert model.collect_workers is None
+        assert 'collect_workers' not in model.refs
+    finally:
+        model.close()
+    name = _exported(tmp_path, 'workers_exported')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    package = import_module(name)
+    exported = package.mx_model
+    assert exported.collect_workers is None
+    serial = exported.Policies.collect().sum.value
+    for workers in (1, 4, 100):          # more workers than the six items: one per item
+        exported.clear_all()
+        exported.collect_workers = workers
+        assert exported.collect_workers == workers
+        assert exported.Policies.collect().sum.value == serial == 22.5
+    for bad in (0, -2, False, 1.0):
+        with pytest.raises(ValueError):
+            exported.collect_workers = bad
+    exported._mx_collect_set_workers_v2(3)          # export protocol 2 alias
+    assert exported.collect_workers == 3
+    with pytest.raises(ValueError):
+        exported._mx_collect_set_workers_v2(None)
+
+
+def test_collect_with_the_gil_evaluates_serially(monkeypatch):
+    from concurrent import futures
+    from modelx.export import _mx_sys as runtime
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: True, raising=False)
+    monkeypatch.setattr(futures, 'ThreadPoolExecutor', None)    # a worker pool would fail
+    base = SimpleNamespace(_model=SimpleNamespace())
+    runtime.BaseModel._mx_collect_init_v2(base._model)
+    runtime.BaseModel.collect_workers.fset(base._model, 4)
+    seen = []
+
+    def evaluate(coords):
+        seen.append(tuple(coords))
+        return runtime.CollectResult({'sum': runtime.CollectResult({'value': float(sum(coords))})})
+    result = runtime.collect_from_space(base, range(8), 'key', (), (), evaluate_serial=evaluate,
+                                        reuse_in_parallel=True)
+    assert result.sum.value == 28.0 and seen == [tuple(range(8))]

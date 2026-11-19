@@ -80,7 +80,21 @@ class BaseModel(BaseParent):
     def _mx_collect_init_v2(self):
         self._mx_collect_dispatch_state = threading.local()
 
+    @property
+    def collect_workers(self):
+        """Number of worker threads ``collect()`` may use, or None for the default (``Model.collect_workers``
+        of live modelx): the ``parallel_workers`` a compiled model was built with, else 1. Workers run in
+        parallel only on a free-threaded build; with the GIL, collect evaluates serially."""
+        return getattr(self, '_mx_collect_workers_override', None)
+
+    @collect_workers.setter
+    def collect_workers(self, workers):
+        if workers is not None and (type(workers) is not int or workers < 1):
+            raise ValueError('collect_workers must be None or a positive integer')
+        self._mx_collect_workers_override = workers
+
     def _mx_collect_set_workers_v2(self, workers):
+        # export protocol 2: the name packages built before ``collect_workers`` use
         if type(workers) is not int or workers < 1:
             raise ValueError('collect workers must be a positive integer')
         self._mx_collect_workers_override = workers
@@ -246,6 +260,8 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
     override = getattr(base._model, '_mx_collect_workers_override', None)
     if override is not None:
         workers = override
+    if workers > 1 and getattr(sys, '_is_gil_enabled', lambda: True)():
+        workers = 1         # with the GIL, threads cannot evaluate model code at the same time
 
     if (evaluate_serial is not None and workers == 1
             and not getattr(context, 'active', False)
