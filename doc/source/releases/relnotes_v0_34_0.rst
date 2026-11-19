@@ -16,6 +16,14 @@ Anaconda users should use the ``conda`` command instead::
 Enhancements
 ============
 
+* :meth:`UserSpace.set_collect <modelx.core.space.UserSpace.set_collect>`
+  declares, or changes, how ``collect()`` evaluates an existing Space, with the
+  values :meth:`~modelx.core.space.UserSpace.new_space` takes as
+  ``collect_over`` and ``collect_outputs``. The domain can then be a Cells of
+  the Space itself (``space.set_collect(over={'point_id': space.policy_ids},
+  outputs=...)``). ``new_space(collect_over=..., collect_outputs=...)`` is
+  unchanged; a saved model keeps the declaration.
+
 * :attr:`Model.collect_workers <modelx.core.model.Model.collect_workers>` sets the
   number of worker threads ``collect()`` may use, the same way on a live, an
   exported and a compiled model (``model.collect_workers = 4``; :obj:`None`
