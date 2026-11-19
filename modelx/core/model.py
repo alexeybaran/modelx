@@ -619,10 +619,18 @@ class Model(IOSpecOperation, EditableParent):
         More workers than items use one worker per item. The result is the same for
         any number of workers.
 
-        Live modelx always evaluates ``collect()`` in the calling thread: it accepts the
-        setting so that the same script runs live, exported and compiled. An exported or
-        compiled model runs workers in parallel only on a free-threaded Python build; on a
-        build with the GIL it evaluates serially. The setting is not saved with the model.
+        What ``collect()`` does with more than one worker, on a free-threaded build:
+
+        ==================  ==========================================================
+        live modelx         serial: formulas are evaluated through one shared,
+                            unlocked call stack and dependency graph per model
+        exported model      parallel worker threads (pure Python)
+        compiled model      parallel worker threads (native code)
+        ==================  ==========================================================
+
+        Live modelx accepts the setting so that the same script runs live, exported and
+        compiled. On a build with the GIL every form evaluates serially. The setting is not
+        saved with the model.
 
         .. versionadded:: 0.34.0
         """

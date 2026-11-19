@@ -21,7 +21,10 @@ Enhancements
   exported and a compiled model (``model.collect_workers = 4``; :obj:`None`
   restores the default). With 1 worker, ``collect()`` evaluates the items one
   after another as before; the result is the same for any number of workers.
-  Live modelx and builds with the GIL evaluate serially.
+  On a free-threaded build an exported or a compiled model evaluates with
+  worker threads; live modelx evaluates serially, because a live model
+  evaluates its formulas through one shared call stack and dependency graph.
+  On a build with the GIL every form evaluates serially.
 
 * Tools can tell what a value is from the name of its class
   (:ref:`toolapi-kinds`). A tool first checks that
