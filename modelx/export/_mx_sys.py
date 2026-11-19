@@ -270,6 +270,8 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
         workers = override
     if workers > 1 and getattr(sys, '_is_gil_enabled', lambda: True)():
         workers = 1         # with the GIL, threads cannot evaluate model code at the same time
+    if workers > len(coords):
+        workers = max(1, len(coords))   # one item: the serial path (the evaluator, no thread pool)
 
     if (evaluate_serial is not None and workers == 1
             and not getattr(context, 'active', False)
