@@ -789,6 +789,53 @@ class UserSpace(BaseSpace, EditableParent):
     # ----------------------------------------------------------------------
     # Manipulating cells
 
+    def set_collect(self, over, outputs=None):
+        """Declare, or change, how :meth:`collect` evaluates this Space.
+
+        ``set_collect`` takes the same two values as :meth:`new_space` takes
+        as ``collect_over`` and ``collect_outputs``, for a Space that already
+        exists, so that the domain can be a Cells of the Space itself::
+
+            >>> space = model.new_space('Projection', formula=lambda point_id: None)
+            >>> space.new_cells('policy_ids', lambda: tuple(points.index))
+            >>> space.new_cells('pv', lambda: ...)
+            >>> space.set_collect(over={'point_id': space.policy_ids},
+            ...                   outputs=lambda: {'sum': {'pv': pv()}})
+            >>> space.collect().sum.pv
+
+        Args:
+            over: A mapping of the one Space parameter to iterate to its
+                finite ordered domain: a zero-argument Cells or a Reference of
+                this Space (the forms a saved, exported or compiled model
+                keeps), or a plain iterable.
+            outputs (optional): The zero-argument ``collect_outputs`` formula.
+                It replaces the formula of an existing ``collect_outputs``
+                Cells, or creates it; omit it to keep the existing one.
+
+        A change discards the results of earlier ``collect()`` calls. A model
+        saved with :func:`~modelx.write_model` keeps the declaration.
+
+        .. versionadded:: 0.34.0
+        """
+        from modelx.core.collect import validate_collect_contract
+        impl = self._impl
+        existing = impl.cells.get('collect_outputs')
+        if outputs is None and existing is None:
+            raise TypeError("set_collect needs outputs: the Space has no collect_outputs")
+        if impl.formula is None:
+            raise TypeError("a collect-enabled Space must have a parameter formula")
+        over, formula = validate_collect_contract(
+            impl.formula, over, existing.formula if outputs is None else outputs)
+        runner = getattr(impl, 'collect_runner', None)
+        if runner is not None:
+            runner.clear()
+        if outputs is not None:
+            if existing is not None:
+                self.cells['collect_outputs'].formula = formula
+            else:
+                self.new_cells('collect_outputs', formula)
+        impl.set_collect_spec(over)
+
     def new_cells(self, name=None, formula=None, is_cached=True):
         """Create a new :class:`~modelx.core.cells.Cells` object in this space.
 
