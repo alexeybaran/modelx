@@ -281,3 +281,20 @@ def test_collect_with_the_gil_evaluates_serially(monkeypatch):
     result = runtime.collect_from_space(base, range(8), 'key', (), (), evaluate_serial=evaluate,
                                         reuse_in_parallel=True)
     assert result.sum.value == 28.0 and seen == [tuple(range(8))]
+
+
+def test_one_item_with_several_workers_takes_the_serial_evaluator(monkeypatch):
+    from concurrent import futures
+    from modelx.export import _mx_sys as runtime
+    monkeypatch.setattr(futures, 'ThreadPoolExecutor', None)    # a worker pool would fail
+    base = SimpleNamespace(_model=SimpleNamespace())
+    runtime.BaseModel._mx_collect_init_v2(base._model)
+    runtime.BaseModel.collect_workers.fset(base._model, 4)
+    seen = []
+
+    def evaluate(coords):
+        seen.append(tuple(coords))
+        return runtime.CollectResult({'sum': runtime.CollectResult({'value': 1.5})})
+    result = runtime.collect_from_space(base, (7,), 'key', (), (), evaluate_serial=evaluate,
+                                        reuse_in_parallel=True)
+    assert result.sum.value == 1.5 and seen == [(7,)]
