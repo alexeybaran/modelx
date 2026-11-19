@@ -222,6 +222,9 @@ class CollectResult:
 
 
 _mx_collect_adapter_version = 2
+# Protocol 2 extension: a compiled evaluator may take the collect's other Space parameters
+# (``_mx_collect_options_v2()`` returns a fifth element, True).
+_mx_collect_evaluator_args = True
 
 
 def _mx_collect_state(base):
@@ -256,7 +259,12 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
     workers = 1
     options = getattr(base, '_mx_collect_options_v2', None)
     if options is not None:
-        workers, evaluate_serial, reuse_in_parallel, private_ordered = options()
+        options = options()
+        workers, evaluate_serial, reuse_in_parallel, private_ordered = options[:4]
+        if len(options) > 4 and options[4] and evaluate_serial is not None:
+            evaluator = evaluate_serial
+            def evaluate_serial(coords):        # the evaluator of this call's other parameters
+                return evaluator(coords, args)
     override = getattr(base._model, '_mx_collect_workers_override', None)
     if override is not None:
         workers = override
