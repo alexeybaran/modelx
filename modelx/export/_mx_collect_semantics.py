@@ -26,9 +26,31 @@ def normalize_domain(value):
     return domain
 
 
+_IMMUTABLE_SCALARS = (float, int, bool, str, bytes, complex, type(None))
+
+
+def _all_scalars(items):
+    for item in items:
+        if type(item) not in _IMMUTABLE_SCALARS:
+            return False
+    return True
+
+
 def _detach(value, live_types):
-    if type(value) in (float, int, bool, str, bytes, complex, type(None)):
+    kind = type(value)
+    if kind in _IMMUTABLE_SCALARS:
         return value
+    # A flat container of immutable scalars (exact types) needs no walk: its shallow copy equals the deep copy,
+    # and no live object can be among the items. Anything else (nested, mutable or other items) as below.
+    if kind is dict:
+        if _all_scalars(value) and _all_scalars(value.values()):
+            return dict(value)
+    elif kind is list:
+        if _all_scalars(value):
+            return list(value)
+    elif kind is tuple:
+        if _all_scalars(value):
+            return value
     remaining = [value]
     seen = set()
     while remaining:
