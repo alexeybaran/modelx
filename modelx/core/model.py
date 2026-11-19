@@ -604,6 +604,37 @@ class Model(IOSpecOperation, EditableParent):
         return result
 
     @property
+    def collect_workers(self):
+        """Number of worker threads ``collect()`` may use, or :obj:`None`.
+
+        The same setting exists on the live model, on an exported model and on a model
+        compiled from the export. Set it to a positive integer to choose the number of
+        workers for every ``collect()`` of the model; set it to :obj:`None` to use the
+        default, which is 1, or the ``parallel_workers`` the compiled model was built with::
+
+            >>> model.collect_workers = 4
+            >>> model.Projection.collect()     # up to 4 workers
+
+        With 1 worker, ``collect()`` evaluates the items one after another as before.
+        More workers than items use one worker per item. The result is the same for
+        any number of workers.
+
+        Live modelx always evaluates ``collect()`` in the calling thread: it accepts the
+        setting so that the same script runs live, exported and compiled. An exported or
+        compiled model runs workers in parallel only on a free-threaded Python build; on a
+        build with the GIL it evaluates serially. The setting is not saved with the model.
+
+        .. versionadded:: 0.34.0
+        """
+        return self._impl.collect_workers
+
+    @collect_workers.setter
+    def collect_workers(self, workers):
+        if workers is not None and (type(workers) is not int or workers < 1):
+            raise ValueError('collect_workers must be None or a positive integer')
+        self._impl.collect_workers = workers
+
+    @property
     def tracegraph(self):
         """A directed graph of cells."""
         return self._impl.tracegraph
@@ -1200,6 +1231,7 @@ class ModelImpl(*_model_impl_base):
         "currentspace",
         "path",
         "valreg",
+        "collect_workers",
         "spmgr"      # shadows Impl.spmgr property; the SpaceManager home
     ) + get_mixin_slots(*_model_impl_base)
 
@@ -1229,6 +1261,7 @@ class ModelImpl(*_model_impl_base):
         self._namespace = CustomChainMap(self.named_spaces, self._global_refs)
         self.namespace = ModelNamespace(self)
         self.allow_none = False
+        self.collect_workers = None
         self.valreg = ValueRegistry(self, system.iomanager)
 
     def rename(self, name):
