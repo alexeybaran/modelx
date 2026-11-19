@@ -815,6 +815,9 @@ class UserSpace(BaseSpace, EditableParent):
         A change discards the results of earlier ``collect()`` calls. A model
         saved with :func:`~modelx.write_model` keeps the declaration.
 
+        The ``individual`` section of the result is a dict keyed by the loop
+        parameter in domain order, for any :attr:`~modelx.core.model.Model.collect_workers`.
+
         .. versionadded:: 0.34.0
         """
         from modelx.core.collect import validate_collect_contract

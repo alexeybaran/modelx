@@ -616,8 +616,11 @@ class Model(IOSpecOperation, EditableParent):
             >>> model.Projection.collect()     # up to 4 workers
 
         With 1 worker, ``collect()`` evaluates the items one after another as before.
-        More workers than items use one worker per item. The result is the same for
-        any number of workers.
+        More workers than items use one worker per item. For any number of workers the
+        ``individual`` section is a dict keyed by the loop parameter in domain order, with
+        the values of a serial run. The ``sum`` totals of more than one worker add the
+        workers' partial totals, so a floating-point total can differ from the serial one
+        in the last bits.
 
         What ``collect()`` does with more than one worker, on a free-threaded build:
 
