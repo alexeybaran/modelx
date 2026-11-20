@@ -252,7 +252,7 @@ def test_collect_workers_property_live_and_exported(tmp_path, monkeypatch):
     assert exported.collect_workers is None
     serial = exported.Policies.collect().sum.value
     for workers in (1, 4, 100):          # more workers than the six items: one per item
-        exported.clear_all()
+        exported = type(exported)()     # a fresh model: an exported model has no clear
         exported.collect_workers = workers
         assert exported.collect_workers == workers
         assert exported.Policies.collect().sum.value == serial == 22.5
