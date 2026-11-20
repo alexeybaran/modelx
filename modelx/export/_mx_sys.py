@@ -99,12 +99,6 @@ class BaseModel(BaseParent):
             raise ValueError('collect workers must be a positive integer')
         self._mx_collect_workers_override = workers
 
-    def clear_all(self):
-        """Clear every Space of the model and delete all ItemSpaces (``Model.clear_all()`` of live
-        modelx: ``clear_all()`` of each top-level Space)."""
-        for space in self._mx_spaces.values():
-            space.clear_all()
-
     def _mx_load_io(self):
 
         ios = {}
@@ -150,32 +144,6 @@ class BaseSpace(BaseParent):
 
         return self._mx_cells
 
-
-    # Clearing (modelx-cython D130): of live modelx's clears only Space.clear_all() and Model.clear_all()
-    # are provided, with live's names and scope. Nothing is cleared automatically: an input edited in
-    # place or replaced is seen by what is computed after the clear of the Spaces that read it. A compiled
-    # model has the same interface and behaviour.
-
-    def clear_all(self):
-        """Clear the cell values of this Space and the Spaces below it and delete their ItemSpaces."""
-        for space in self._mx_walk():
-            space._mx_clear_values()
-
-    def _mx_clear_values(self):
-        """Empty this Space's caches and drop its ItemSpaces (a compiled class generates its own). Not
-        synchronised with calculations running in other threads, as live modelx's clear is not."""
-        for name in getattr(sys.modules[self.__class__.__module__], "_v_cells_names_" + self._name):
-            if hasattr(self, "_has_" + name):
-                setattr(self, "_v_" + name, None)
-                setattr(self, "_has_" + name, False)
-            else:
-                cache = getattr(self, "_v_" + name, None)
-                if type(cache) is dict:
-                    cache.clear()
-        for name in ('_mx_itemspaces', '_mx_collect_cache'):
-            store = getattr(self, name, None)
-            if store:
-                store.clear()
 
     def _mx_is_in(self, parent: BaseParent):
         p = self
