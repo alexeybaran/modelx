@@ -193,6 +193,7 @@ _mx_collect_adapter_version = 2
 # Protocol 2 extension: a compiled evaluator may take the collect's other Space parameters
 # (``_mx_collect_options_v2()`` returns a fifth element, True).
 _mx_collect_evaluator_args = True
+_mx_collect_ordered_rows_v1 = True
 
 
 def _mx_collect_state(base):
@@ -337,18 +338,54 @@ def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
         context.active = active
 
 
-def _mx_collect_batch(base, coords, loop_name, names, args):
+def _mx_collect_batch(base, coords, loop_name, names, args, numeric=None):
     events = []
     context = _mx_collect_state(base)
     active = getattr(context, 'active', False)
     context.active = True
     try:
+        if numeric is not None:
+            return numeric.block(coords)
         events.extend(_mx_collect_policy_outputs(base, coords, loop_name, names, args))
     except BaseException as error:
         return events, error
     finally:
         context.active = active
     return events, None
+
+
+class _OrderedNumericRows:
+    """Transient detached doubles; the scheduler owns domain order and window size."""
+    def __init__(self, fields, evaluate, merge, args, width):
+        from array import array
+        self.fields, self.evaluate, self.merge, self.args = fields, evaluate, merge, args
+        self.native_keys = tuple(None if keys is None else array('q', keys) for _, keys in fields)
+        self.width = width
+        self.zero = array('d', [0.])
+        self.total = self.zero * width
+        self.started = False
+
+    def block(self, coords):
+        storage = self.zero * (len(coords) * self.width)
+        count, error = self.evaluate(coords, self.args, self.native_keys, storage, self.width)
+        return (storage, count), error
+
+    def consume(self, event):
+        storage, count = event
+        if count:
+            self.merge(self.total, storage, count, self.started)
+            self.started = True
+
+    def result(self):
+        fields, offset = {}, 0
+        for label, keys in self.fields:
+            if keys is None:
+                fields[label] = self.total[offset]
+                offset += 1
+            else:
+                fields[label] = {key: self.total[offset + i] for i, key in enumerate(keys)}
+                offset += len(keys)
+        return CollectResult({'sum': CollectResult(fields)})
 
 
 def _mx_collect_ordered(base, coords, loop_name, names, args, workers):
@@ -359,17 +396,26 @@ def _mx_collect_ordered(base, coords, loop_name, names, args, workers):
     # Bound unmerged output by keeping at most one small batch per worker.
     size = max(1, min(8, len(coords) // workers))
     starts = iter(range(0, len(coords), size))
-    accumulator = Accumulator(CollectResult)
+    prepare = None
+    if sys.gettrace() is None and sys.getprofile() is None:
+        prepare = getattr(type(base), '_mx_prepare_ordered_rows_v1', None)
+    numeric = prepare(base, coords, args, size, workers) if prepare is not None else None
+    accumulator = numeric if numeric is not None else Accumulator(CollectResult)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         def submit(start):
-            return executor.submit(_mx_collect_batch, base, coords[start:start + size],
-                                   loop_name, names, args)
+            batch = coords[start:start + size]
+            if numeric is None:
+                return executor.submit(_mx_collect_batch, base, batch, loop_name, names, args)
+            return executor.submit(_mx_collect_batch, base, batch, loop_name, names, args, numeric)
 
         pending = collections.deque(submit(start) for start in islice(starts, workers))
         while pending:
             events, error = pending.popleft().result()
-            for coordinate, outputs in events:
-                accumulator.add(coordinate, outputs)
+            if numeric is None:
+                for coordinate, outputs in events:
+                    accumulator.add(coordinate, outputs)
+            elif events:
+                numeric.consume(events)
             if error is not None:
                 raise error
             start = next(starts, None)
