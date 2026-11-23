@@ -41,6 +41,10 @@ def test_numeric_domains_preserve_native_keys_and_decline_irregular_shapes():
     assert numeric_keys(domain, layouts) is domain
     assert numeric_keys(domain, layouts) is domain
     assert numeric_keys(range(0), layouts) == ()
+    offsets = numeric_keys(range(-2, 4, 2), layouts)
+    assert offsets == (-2, 0, 2)
+    assert numeric_keys(range(-2, 4, 2), layouts) is offsets
+    assert numeric_keys(range(2, -4, -2), layouts) == (2, 0, -2)
     for other in ([1, 3], (2, 2), (1, True), (1 << 64,), range(1 << 100)):
         assert numeric_keys(other, layouts) is None
 

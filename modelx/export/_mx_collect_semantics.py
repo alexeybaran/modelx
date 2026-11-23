@@ -42,12 +42,18 @@ class CollectedSeries(dict):
 
 def numeric_keys(domain, layouts):
     """Inspect only bounded, immutable built-in domains, after the policy factory."""
-    identity = id(domain)
-    known = layouts.get(identity)
-    if known is not None and known[0] is domain:
-        return known[1]
-    if type(domain) not in (tuple, range):
+    kind = type(domain)
+    if kind is range:
+        # Fresh ItemSpaces can compute equal ranges independently. Their
+        # bounds describe the same ordered keys without enumerating them.
+        layout = domain.start, domain.stop, domain.step
+    elif kind is tuple:
+        layout = id(domain)
+    else:
         return None
+    known = layouts.get(layout)
+    if known is not None and (kind is range or known[0] is domain):
+        return known[1]
     try:
         size = len(domain)
     except OverflowError:
@@ -59,7 +65,7 @@ def numeric_keys(domain, layouts):
             or len(set(keys)) != size):
         return None
     if len(layouts) < 16:
-        layouts[identity] = domain, keys
+        layouts[layout] = domain, keys
     return keys
 
 
