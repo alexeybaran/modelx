@@ -1,6 +1,7 @@
 """Collection domain and per-policy result semantics shared by all runtimes."""
 
 from collections import OrderedDict
+from array import array
 from collections.abc import Iterable, Sized
 from copy import deepcopy
 from itertools import chain
@@ -38,10 +39,49 @@ class CollectedSeries(dict):
         return self[(key, *rest) if rest else key]
 
 
+def numeric_keys(domain, layouts):
+    """Inspect only bounded, immutable built-in domains, after the policy factory."""
+    identity = id(domain)
+    known = layouts.get(identity)
+    if known is not None and known[0] is domain:
+        return known[1]
+    if type(domain) not in (tuple, range):
+        return None
+    try:
+        size = len(domain)
+    except OverflowError:
+        return None
+    if size > 4096:
+        return None
+    keys = tuple(domain)
+    if (any(type(k) is not int or not -(1 << 63) <= k < (1 << 63) for k in keys)
+            or len(set(keys)) != size):
+        return None
+    if len(layouts) < 16:
+        layouts[identity] = domain, keys
+    return keys
+
+
+class PackedFloatSeries:
+    """Internal sum leaf containing detached native doubles in source key order."""
+
+    __slots__ = ('keys', 'values', 'add_values')
+
+    def __init__(self, keys, add_values):
+        self.keys = keys
+        self.values = array('d', [0.0]) * len(keys)
+        self.add_values = add_values
+
+    def as_dict(self):
+        return CollectedSeries(zip(self.keys, self.values))
+
+
 def callable_fields(fields):
     # Native sum evaluators can supply a plain dict without visiting prepare_output.
     for name, value in fields.items():
-        if type(value) is dict:
+        if type(value) is PackedFloatSeries:
+            fields[name] = value.as_dict()
+        elif type(value) is dict:
             fields[name] = CollectedSeries(value)
     return fields
 
@@ -102,6 +142,15 @@ def prepare_output(value, live_types):
     return prepared
 
 
+def detached_numeric_sum(outputs, live_types):
+    # A non-native domain was already evaluated in source order on the root.
+    # Detach its ordinary dictionary at the same point as prepare_output.
+    for name, value in outputs.items():
+        if type(value) is dict:
+            outputs[name] = _detach(value, live_types, CollectedSeries)
+    return {'sum': outputs}
+
+
 def _shape(value):
     if type(value) in (dict, CollectedSeries):
         return {name: _shape(item) for name, item in value.items()}
@@ -118,6 +167,13 @@ def _check_shape(expected, value, path):
 
 
 def _add(old, new, path):
+    if type(old) is PackedFloatSeries:
+        if type(new) is PackedFloatSeries and old.keys == new.keys:
+            old.add_values(old.values, new.values)
+            return old
+        old = old.as_dict()
+    if type(new) is PackedFloatSeries:
+        new = new.as_dict()
     if type(old) in (dict, CollectedSeries) or type(new) in (dict, CollectedSeries):
         if type(old) not in (dict, CollectedSeries) or type(new) not in (dict, CollectedSeries) or tuple(old) != tuple(new):
             raise ValueError(f"collect_outputs structure changed between loop iterations at {path}")

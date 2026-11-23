@@ -440,6 +440,10 @@ def _mx_collect_policy_outputs(base, coords, loop_name, names, args):
     from ._mx_collect_semantics import prepare_output
 
     scratch = {}
+    layouts = {}
+    gather = None
+    if sys.gettrace() is None and sys.getprofile() is None:
+        gather = getattr(type(base), '_mx_collect_numeric_output_v1', None)
     # A compiled class may offer the construction and release its own collect evaluator and items use
     # (modelx-cython D116): the root is then built and freed the same way on every collect path.
     shared_root = getattr(base, '_mx_collect_new_root', None)
@@ -475,7 +479,9 @@ def _mx_collect_policy_outputs(base, coords, loop_name, names, args):
                     attach = getattr(space, '_mx_collect_attach', None)
                     if attach is not None:
                         attach(scratch, template)
-                outputs = prepare_output(root.collect_outputs(), (BaseMxObject,))
+                outputs = gather(root, layouts) if gather is not None else None
+                if outputs is None:
+                    outputs = prepare_output(root.collect_outputs(), (BaseMxObject,))
                 complete = True
             finally:
                 cleanup_error = None
