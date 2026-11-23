@@ -29,6 +29,23 @@ def normalize_domain(value):
 _IMMUTABLE_SCALARS = (float, int, bool, str, bytes, complex, type(None))
 
 
+class CollectedSeries(dict):
+    """A detached named output indexed by its original key or tuple of keys."""
+
+    __slots__ = ()
+
+    def __call__(self, key, /, *rest):
+        return self[(key, *rest) if rest else key]
+
+
+def callable_fields(fields):
+    # Native sum evaluators can supply a plain dict without visiting prepare_output.
+    for name, value in fields.items():
+        if type(value) is dict:
+            fields[name] = CollectedSeries(value)
+    return fields
+
+
 def _all_scalars(items):
     for item in items:
         if type(item) not in _IMMUTABLE_SCALARS:
@@ -36,15 +53,15 @@ def _all_scalars(items):
     return True
 
 
-def _detach(value, live_types):
+def _detach(value, live_types, dict_type=dict):
     kind = type(value)
     if kind in _IMMUTABLE_SCALARS:
         return value
     # A flat container of immutable scalars (exact types) needs no walk: its shallow copy equals the deep copy,
     # and no live object can be among the items. Anything else (nested, mutable or other items) as below.
-    if kind is dict:
+    if kind in (dict, CollectedSeries):
         if _all_scalars(value) and _all_scalars(value.values()):
-            return dict(value)
+            return dict_type(value)
     elif kind is list:
         if _all_scalars(value):
             return list(value)
@@ -59,7 +76,7 @@ def _detach(value, live_types):
             raise TypeError("collect_outputs must return data, not live modelx objects")
         if id(item) not in seen:
             seen.add(id(item))
-            if type(item) is dict:
+            if type(item) in (dict, CollectedSeries):
                 remaining.extend(chain(item, item.values()))
             elif type(item) in (list, tuple, set, frozenset):
                 remaining.extend(item)
@@ -81,28 +98,28 @@ def prepare_output(value, live_types):
             raise TypeError(f"collect_outputs[{mode!r}] must be a plain dict with string output names")
         if not outputs:
             raise ValueError(f"collect_outputs[{mode!r}] must not be empty")
-        prepared[mode] = {name: _detach(item, live_types) for name, item in outputs.items()}
+        prepared[mode] = {name: _detach(item, live_types, CollectedSeries) for name, item in outputs.items()}
     return prepared
 
 
 def _shape(value):
-    if type(value) is dict:
+    if type(value) in (dict, CollectedSeries):
         return {name: _shape(item) for name, item in value.items()}
     return None
 
 
 def _check_shape(expected, value, path):
-    if expected is None and type(value) is not dict:
+    if expected is None and type(value) not in (dict, CollectedSeries):
         return
-    if expected is None or type(value) is not dict or tuple(value) != tuple(expected):
+    if expected is None or type(value) not in (dict, CollectedSeries) or tuple(value) != tuple(expected):
         raise ValueError(f"collect_outputs structure changed between loop iterations at {path}")
     for name, item in value.items():
         _check_shape(expected[name], item, path + (name,))
 
 
 def _add(old, new, path):
-    if type(old) is dict or type(new) is dict:
-        if type(old) is not dict or type(new) is not dict or tuple(old) != tuple(new):
+    if type(old) in (dict, CollectedSeries) or type(new) in (dict, CollectedSeries):
+        if type(old) not in (dict, CollectedSeries) or type(new) not in (dict, CollectedSeries) or tuple(old) != tuple(new):
             raise ValueError(f"collect_outputs structure changed between loop iterations at {path}")
         for name, item in new.items():
             old[name] = _add(old[name], item, path + (name,))

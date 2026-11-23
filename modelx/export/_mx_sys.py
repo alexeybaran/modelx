@@ -174,7 +174,8 @@ class CollectResult:
     __slots__ = ('_fields',)
 
     def __init__(self, fields):
-        self._fields = fields
+        from ._mx_collect_semantics import callable_fields
+        self._fields = callable_fields(fields)
 
     def __getattr__(self, name):
         try:

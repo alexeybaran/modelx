@@ -9,6 +9,21 @@ import modelx as mx
 from modelx.export._mx_collect_semantics import _detach
 
 
+def test_callable_named_series_uses_the_same_stored_tuple_key():
+    model = mx.new_model("CollectTupleKey")
+    try:
+        space = model.new_space(
+            "Projection", formula="lambda policy_id: None", collect_over={"policy_id": (1, 2)},
+            collect_outputs='lambda: {"individual": {"history": {(2, 3): [policy_id]}}}')
+        first = space.collect().individual[1].history
+        assert first(2, 3) is first[(2, 3)] is first((2, 3))
+        with pytest.raises(KeyError):
+            first(3, 2)
+        assert first == {(2, 3): [1]}
+    finally:
+        model.close()
+
+
 class Live:
     pass
 

@@ -16,6 +16,12 @@ Anaconda users should use the ``conda`` command instead::
 Enhancements
 ============
 
+* Named dictionary outputs from ``collect()`` accept calls as well as
+  subscripts. For example, ``result.individual[p].mgsv_pp(72)`` returns the
+  value stored at ``result.individual[p].mgsv_pp[72]``. This also applies to
+  named sums. Multiple positional arguments select a tuple key. A missing
+  key raises ``KeyError``. Calling a result never evaluates a policy.
+
 * :meth:`UserSpace.set_collect <modelx.core.space.UserSpace.set_collect>`
   declares, or changes, how ``collect()`` evaluates an existing Space, with the
   values :meth:`~modelx.core.space.UserSpace.new_space` takes as

@@ -59,6 +59,12 @@ def test_collect_exports_transient_policy_execution(tmp_path):
     try:
         exported = import_module("collect_export").mx_model
         result = exported.Projection.collect(5)
+        for portfolio in (expected, result):
+            for series in (portfolio.individual[2].net_cf, portfolio.sum.net_cf):
+                assert series(1) == series[1]
+                with pytest.raises(KeyError):
+                    series(99)
+                assert list(series) == [0, 1, 2]
         assert result.sum.pv == expected.sum.pv
         assert result.sum.net_cf == expected.sum.net_cf
         assert result.individual[2].net_cf == expected.individual[2].net_cf

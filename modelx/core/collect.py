@@ -19,7 +19,7 @@ from modelx.core.dynamic import ItemSpaceImpl
 from modelx.core.formula import Formula
 from modelx.core.reference import ReferenceImpl, ReferenceProxy
 from modelx.core.node import NodeFactory, BaseNodeFactoryImpl
-from modelx.export._mx_collect_semantics import Accumulator, normalize_domain, prepare_output
+from modelx.export._mx_collect_semantics import Accumulator, callable_fields, normalize_domain, prepare_output
 
 
 class _IdentityArgument:
@@ -55,13 +55,14 @@ class CollectResult:
     The public result mirrors the declared collection modes. For example,
     ``result.individual[policy_id].net_cf`` contains one ItemSpace's retained
     outputs while ``result.sum.net_cf`` contains values summed over the
-    collection domain. Nested dictionaries below an output name are preserved.
+    collection domain. A named dictionary output supports both ``net_cf[t]``
+    and ``net_cf(t)``. Both return the same stored value.
     """
 
     __slots__ = ("_fields",)
 
     def __init__(self, fields):
-        self._fields = fields
+        self._fields = callable_fields(fields)
 
     def __getattr__(self, name):
         try:
