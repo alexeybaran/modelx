@@ -190,11 +190,33 @@ class CollectResult:
         return 'CollectResult(%s)' % ', '.join(self._fields)
 
 
+class _PendingCollectSum:
+    """A sum that has not reached its public result or cache boundary."""
+
+    __slots__ = ('_fields',)
+
+    def __init__(self, fields):
+        self._fields = fields
+
+
+def _publish_collect_result(result):
+    if type(result) is CollectResult:
+        sums = result._fields.get('sum')
+        if type(sums) is _PendingCollectSum:
+            from ._mx_collect_semantics import PackedFloatSeries, public_numeric_series
+            result._fields['sum'] = CollectResult({
+                name: public_numeric_series(value.keys, value.values) if type(value) is PackedFloatSeries else value
+                for name, value in sums._fields.items()
+            })
+    return result
+
+
 _mx_collect_adapter_version = 2
 # Protocol 2 extension: a compiled evaluator may take the collect's other Space parameters
 # (``_mx_collect_options_v2()`` returns a fifth element, True).
 _mx_collect_evaluator_args = True
 _mx_collect_ordered_rows_v1 = True
+_mx_collect_packed_sums_v1 = True
 
 
 def _mx_collect_state(base):
@@ -252,6 +274,7 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
         finally:
             context.active = False
         if result is not None:
+            result = _publish_collect_result(result)
             return result if cache is None else cache.setdefault(key, result)
     if evaluate is None:
         can_parallel = getattr(base._model, '_mx_collect_parallel_allowed', None)
@@ -275,6 +298,7 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
                 context.active = active
     else:
         result = evaluate()
+    result = _publish_collect_result(result)
     return result if cache is None else cache.setdefault(key, result)
 
 
@@ -290,6 +314,7 @@ def _mx_collect_parallel(base, coords, loop_name, names, args, private, private_
               for i in range(workers)]
     result = None
     individual_shape = None
+    pending_sum = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args, private)
                    for chunk in chunks]
@@ -319,9 +344,12 @@ def _mx_collect_parallel(base, coords, loop_name, names, args, private, private_
                             _check_shape(individual_shape, item._fields, (mode,))
                         result[mode][coordinate] = item
                 else:
+                    if type(values) is _PendingCollectSum:
+                        pending_sum = True
                     current = result[mode]
                     result[mode] = values._fields if current is None else _add(current, values._fields, (mode,))
-    return CollectResult({mode: value if mode == 'individual' else CollectResult(value)
+    sum_type = _PendingCollectSum if pending_sum else CollectResult
+    return CollectResult({mode: value if mode == 'individual' else sum_type(value)
                           for mode, value in result.items()})
 
 
@@ -378,14 +406,16 @@ class _OrderedNumericRows:
             self.started = True
 
     def result(self):
+        from ._mx_collect_semantics import public_numeric_series
         fields, offset = {}, 0
         for label, keys in self.fields:
             if keys is None:
                 fields[label] = self.total[offset]
                 offset += 1
             else:
-                fields[label] = {key: self.total[offset + i] for i, key in enumerate(keys)}
-                offset += len(keys)
+                end = offset + len(keys)
+                fields[label] = public_numeric_series(keys, self.total[offset:end])
+                offset = end
         return CollectResult({'sum': CollectResult(fields)})
 
 

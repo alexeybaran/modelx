@@ -2,7 +2,8 @@
 
 from collections import OrderedDict
 from array import array
-from collections.abc import Iterable, Sized
+from collections.abc import ItemsView, Iterable, MutableMapping, Sized, ValuesView
+from threading import Lock
 from copy import deepcopy
 from itertools import chain
 
@@ -75,6 +76,122 @@ class PackedFloatSeries:
     def as_dict(self):
         return CollectedSeries(zip(self.keys, self.values))
 
+    @classmethod
+    def from_buffer(cls, keys, values, add_values):
+        """Take ownership of the evaluator's completed, detached buffer."""
+        if len(keys) != len(values):
+            raise ValueError("incompatible numeric collect widths")
+        if len(set(keys)) != len(keys):
+            return CollectedSeries(zip(keys, values))
+        packed = cls.__new__(cls)
+        packed.keys = keys
+        packed.values = values
+        packed.add_values = add_values
+        return packed
+
+
+class NativeCollectedSeries(MutableMapping):
+    """A callable month mapping over a detached contiguous numeric buffer."""
+
+    __slots__ = ('_start', '_storage', '_lock')
+
+    def __init__(self, start, values):
+        self._start = start
+        self._storage = values
+        self._lock = Lock()
+
+    def _dictionary(self):
+        with self._lock:
+            storage = self._storage
+            if type(storage) is not CollectedSeries:
+                keys = range(self._start, self._start + len(storage))
+                storage = self._storage = CollectedSeries(zip(keys, storage))
+            return storage
+
+    def __len__(self):
+        return len(self._storage)
+
+    def __iter__(self):
+        storage = self._storage
+        if type(storage) is CollectedSeries:
+            return iter(storage)
+        return iter(range(self._start, self._start + len(storage)))
+
+    def __reversed__(self):
+        storage = self._storage
+        if type(storage) is CollectedSeries:
+            return reversed(storage)
+        return reversed(range(self._start, self._start + len(storage)))
+
+    def __getitem__(self, key):
+        storage = self._storage
+        if type(storage) is CollectedSeries:
+            return storage[key]
+        if type(key) is int:
+            offset = key - self._start
+            if 0 <= offset < len(storage):
+                return storage[offset]
+            raise KeyError(key)
+        return self._dictionary()[key]
+
+    def __setitem__(self, key, value):
+        self._dictionary()[key] = value
+
+    def __delitem__(self, key):
+        del self._dictionary()[key]
+
+    def __call__(self, key, /, *rest):
+        return self[(key, *rest) if rest else key]
+
+    def popitem(self):
+        return self._dictionary().popitem()
+
+    def values(self):
+        return _NativeValuesView(self)
+
+    def items(self):
+        return _NativeItemsView(self)
+
+    def copy(self):
+        storage = self._storage
+        if type(storage) is CollectedSeries:
+            return storage.copy()
+        return dict(zip(range(self._start, self._start + len(storage)), storage))
+
+    def __copy__(self):
+        storage = self._storage
+        return NativeCollectedSeries(self._start, CollectedSeries(storage) if type(storage) is CollectedSeries else storage[:])
+
+    def __deepcopy__(self, memo):
+        result = NativeCollectedSeries(self._start, array('d'))
+        memo[id(self)] = result
+        result._storage = deepcopy(self._storage, memo)
+        return result
+
+    def __reduce__(self):
+        return NativeCollectedSeries, (self._start, self._storage)
+
+
+class _NativeValuesView(ValuesView):
+    def __iter__(self):
+        storage = self._mapping._storage
+        return iter(storage.values()) if type(storage) is CollectedSeries else iter(storage)
+
+
+class _NativeItemsView(ItemsView):
+    def __iter__(self):
+        series = self._mapping
+        storage = series._storage
+        if type(storage) is CollectedSeries:
+            return iter(storage.items())
+        return zip(range(series._start, series._start + len(storage)), storage)
+
+
+def public_numeric_series(keys, values):
+    start = keys[0] if keys else 0
+    if all(type(key) is int and key == start + offset for offset, key in enumerate(keys)):
+        return NativeCollectedSeries(start, values)
+    return CollectedSeries(zip(keys, values))
 
 def callable_fields(fields):
     # Native sum evaluators can supply a plain dict without visiting prepare_output.
@@ -99,7 +216,7 @@ def _detach(value, live_types, dict_type=dict):
         return value
     # A flat container of immutable scalars (exact types) needs no walk: its shallow copy equals the deep copy,
     # and no live object can be among the items. Anything else (nested, mutable or other items) as below.
-    if kind in (dict, CollectedSeries):
+    if kind in (dict, CollectedSeries, NativeCollectedSeries):
         if _all_scalars(value) and _all_scalars(value.values()):
             return dict_type(value)
     elif kind is list:
@@ -116,7 +233,7 @@ def _detach(value, live_types, dict_type=dict):
             raise TypeError("collect_outputs must return data, not live modelx objects")
         if id(item) not in seen:
             seen.add(id(item))
-            if type(item) in (dict, CollectedSeries):
+            if type(item) in (dict, CollectedSeries, NativeCollectedSeries):
                 remaining.extend(chain(item, item.values()))
             elif type(item) in (list, tuple, set, frozenset):
                 remaining.extend(item)
@@ -152,15 +269,15 @@ def detached_numeric_sum(outputs, live_types):
 
 
 def _shape(value):
-    if type(value) in (dict, CollectedSeries):
+    if type(value) in (dict, CollectedSeries, NativeCollectedSeries):
         return {name: _shape(item) for name, item in value.items()}
     return None
 
 
 def _check_shape(expected, value, path):
-    if expected is None and type(value) not in (dict, CollectedSeries):
+    if expected is None and type(value) not in (dict, CollectedSeries, NativeCollectedSeries):
         return
-    if expected is None or type(value) not in (dict, CollectedSeries) or tuple(value) != tuple(expected):
+    if expected is None or type(value) not in (dict, CollectedSeries, NativeCollectedSeries) or tuple(value) != tuple(expected):
         raise ValueError(f"collect_outputs structure changed between loop iterations at {path}")
     for name, item in value.items():
         _check_shape(expected[name], item, path + (name,))
@@ -174,8 +291,8 @@ def _add(old, new, path):
         old = old.as_dict()
     if type(new) is PackedFloatSeries:
         new = new.as_dict()
-    if type(old) in (dict, CollectedSeries) or type(new) in (dict, CollectedSeries):
-        if type(old) not in (dict, CollectedSeries) or type(new) not in (dict, CollectedSeries) or tuple(old) != tuple(new):
+    if type(old) in (dict, CollectedSeries, NativeCollectedSeries) or type(new) in (dict, CollectedSeries, NativeCollectedSeries):
+        if type(old) not in (dict, CollectedSeries, NativeCollectedSeries) or type(new) not in (dict, CollectedSeries, NativeCollectedSeries) or tuple(old) != tuple(new):
             raise ValueError(f"collect_outputs structure changed between loop iterations at {path}")
         for name, item in new.items():
             old[name] = _add(old[name], item, path + (name,))
