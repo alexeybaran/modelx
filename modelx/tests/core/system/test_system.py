@@ -1,4 +1,8 @@
+import os
+from platform import machine
+import subprocess
 import sys
+import threading
 import modelx as mx
 from textwrap import dedent
 from modelx.core.system import mxsys
@@ -9,10 +13,58 @@ import pytest
 
 
 def test_executer_type():
-    if sys.version_info < (3, 12) and sys.platform == "win32":
-        assert isinstance(mxsys.executor, mx.core.system.ThreadedExecutor)
-    else:
-        assert isinstance(mxsys.executor, mx.core.system.NonThreadedExecutor)
+    threaded = (
+        sys.platform == "win32" and sys.version_info < (3, 12)
+        or sys.platform == "darwin" and sys.version_info[:2] == (3, 10)
+        and sys.implementation.name == "cpython" and machine() == "x86_64"
+    )
+    executor_type = (mx.core.system.ThreadedExecutor if threaded
+                     else mx.core.system.NonThreadedExecutor)
+    assert type(mxsys.executor) is executor_type
+
+
+def test_threaded_executor_restores_stack_on_start_failure(monkeypatch):
+    stack_sizes = []
+
+    def stack_size(size):
+        stack_sizes.append(size)
+        return 0
+
+    def fail_to_start(self):
+        raise OSError("worker start failed")
+
+    executor = mx.core.system.ThreadedExecutor
+    monkeypatch.setattr(threading, "stack_size", stack_size)
+    monkeypatch.setattr(executor.ExecThread, "start", fail_to_start)
+    with pytest.raises(OSError, match="worker start failed"):
+        executor(stack_size=64 * 1024 * 1024)
+    assert stack_sizes == [64 * 1024 * 1024, 0]
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_threaded_executor_after_idle_fork():
+    source = dedent("""\
+        import os
+        import signal
+        import modelx as mx
+        from modelx.core.system import ThreadedExecutor, mxsys
+
+        if type(mxsys.executor) is not ThreadedExecutor:
+            executor = ThreadedExecutor(stack_size=64 * 1024 * 1024)
+            mxsys.executor = executor
+            mxsys.callstack = executor.callstack
+            mxsys.refstack = executor.refstack
+        model = mx.new_model()
+        cell = model.new_space().new_cells("value", "lambda arg: arg * 2")
+        assert cell(2) == 4
+        pid = os.fork()
+        if pid == 0:
+            signal.alarm(10)
+            os._exit(0 if cell(3) == 6 else 1)
+        assert os.waitpid(pid, 0) == (pid, 0)
+        assert cell(4) == 8
+    """)
+    subprocess.run([sys.executable, "-c", source], check=True, timeout=30)
 
 @pytest.fixture
 def testmodel():

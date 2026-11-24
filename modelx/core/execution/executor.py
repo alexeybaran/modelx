@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import os.path
@@ -93,20 +94,7 @@ class NonThreadedExecutor:
             )
             e = self.excinfo[1]
             if self.is_formula_error_used:
-                errmsg = traceback.format_exception_only(
-                    self.excinfo[0],
-                    e
-                )
-                errmsg = "".join(errmsg)
-
-                if e.__cause__ is not None:
-                    cause = e.__cause__
-                    cause_traceback = ''.join(traceback.format_exception(type(cause), cause, cause.__traceback__))
-                    errmsg += "\nCaused by:\n" + cause_traceback
-
-                errmsg += self.errorstack.tracemessage()
-                err = FormulaError(
-                    "Error raised during formula execution\n" + errmsg)
+                err = self._formula_error(e)
                 if self.is_formula_error_handled:
                     print(err, file=sys.stderr)
                 else:
@@ -117,6 +105,15 @@ class NonThreadedExecutor:
         else:
             return self.buffer
 
+    def _formula_error(self, error):
+        message = "".join(traceback.format_exception_only(type(error), error))
+        cause = error.__cause__
+        if cause is not None:
+            message += "\nCaused by:\n" + "".join(
+                traceback.format_exception(type(cause), cause, cause.__traceback__))
+        return FormulaError("Error raised during formula execution\n" + message
+                            + self.errorstack.tracemessage())
+
     def add_reference(self, ref):
         if self.is_executing:
             self.refstack.append((self.callstack.counter - 1, ref))
@@ -124,23 +121,32 @@ class NonThreadedExecutor:
 
 
 class ThreadedExecutor(NonThreadedExecutor):
+    """Evaluate formulas on a worker with a larger native call stack.
 
-    def __init__(self, maxdepth=None):
+    A process may fork while this executor is idle. For multiprocessing
+    during a calculation, use a spawn context instead.
+    """
+
+    def __init__(self, maxdepth=None, stack_size=0x10000000 - 1):
 
         # Use thread to increase stack size and deepen callstack
         # Ref: https://bugs.python.org/issue32570
 
         NonThreadedExecutor.__init__(self, maxdepth=maxdepth)
-        self.thread = ThreadedExecutor.ExecThread(self)
-        self.thread.daemon = True
-
-        # Set max stack size to nt limit (256MB)
-        # https://github.com/python/cpython/blob/v3.9.6/Python/thread_nt.h#L358
-
-        last_size = threading.stack_size(0x10000000 - 1)
-        self.thread.start()
-        threading.stack_size(last_size)
         self.initnode = None
+        self._stack_size = stack_size
+        self._start_worker()
+
+    def _start_worker(self):
+        thread = self.ExecThread(self)
+        thread.daemon = True
+        last_size = threading.stack_size(self._stack_size)
+        try:
+            thread.start()
+        finally:
+            threading.stack_size(last_size)
+        self.thread = thread
+        self._worker_pid = os.getpid()
 
     class ExecThread(threading.Thread):
 
@@ -165,6 +171,9 @@ class ThreadedExecutor(NonThreadedExecutor):
                 self.signal_stop.set()
 
     def _start_exec(self, node):
+        if self._worker_pid != os.getpid():
+            # A forked process inherits the executor but not its worker.
+            self._start_worker()
         self.initnode = node
         self.excinfo = None
         self.errorstack = None
@@ -186,14 +195,7 @@ class ThreadedExecutor(NonThreadedExecutor):
                     self.rolledback
                 )
                 if self.is_formula_error_used:
-                    errmsg = traceback.format_exception_only(
-                        self.excinfo[0],
-                        self.excinfo[1]
-                    )
-                    errmsg = "".join(errmsg)
-                    errmsg += self.errorstack.tracemessage()
-                    raise FormulaError(
-                        "Error raised during formula execution\n" + errmsg)
+                    raise self._formula_error(self.excinfo[1])
                 else:
                     raise self.excinfo[1]
 

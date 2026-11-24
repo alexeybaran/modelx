@@ -18,6 +18,7 @@ if sys.platform == "linux":
 
 import warnings
 from contextlib import contextmanager
+from platform import machine
 from modelx.core.model import ModelImpl
 from modelx.core.util import AutoNamer
 from modelx.core.errors import DeepReferenceError
@@ -76,13 +77,15 @@ class System:
 
         self.configure_python()
         self.is_formula_error_used = True
-        if sys.version_info >= (3, 12):
-            self.executor = NonThreadedExecutor(maxdepth=maxdepth)
+        if sys.platform == "win32" and sys.version_info < (3, 12):
+            self.executor = ThreadedExecutor(maxdepth=maxdepth)
+        elif (sys.platform == "darwin" and sys.version_info[:2] == (3, 10)
+              and sys.implementation.name == "cpython" and machine() == "x86_64"):
+            # Python 3.10 evaluates nested Python calls on the native stack.
+            # Intel macOS caps the main thread stack below what deep formulas need.
+            self.executor = ThreadedExecutor(maxdepth=maxdepth, stack_size=256 * 1024 * 1024)
         else:
-            if sys.platform == "win32":
-                self.executor = ThreadedExecutor(maxdepth=maxdepth)
-            else:
-                self.executor = NonThreadedExecutor(maxdepth=maxdepth)
+            self.executor = NonThreadedExecutor(maxdepth=maxdepth)
         self.callstack = self.executor.callstack
         self.refstack = self.executor.refstack
         self._modelnamer = AutoNamer("Model")
