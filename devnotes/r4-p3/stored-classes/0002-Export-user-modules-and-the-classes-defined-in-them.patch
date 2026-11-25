@@ -1,0 +1,191 @@
+From 01a9be3178fa739deb20ebd14fb947694522f7fd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 03:17:41 +0000
+Subject: [PATCH 2/3] Export user modules and the classes defined in them
+
+The exported package wrote the module source and its _mx_io entries,
+but _mx_sys had no reader for ModuleIO/ModuleData, so importing the
+package failed with KeyError: 'ModuleIO'. Add MiniModuleIO and
+MiniModuleData, which load the module from the exported file as
+ModuleIO does in modelx.
+
+References to classes defined in such modules are pickled into
+_mx_pickled by ("ModuleAttr", io_data key, class name) and resolved
+against the loaded module, as in the model pickle. Without such
+classes _mx_pickled is written by pickle.dump as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019ikg7NJaGw75uaSPfLFj8d
+---
+ modelx/export/_mx_sys.py           | 41 +++++++++++++++++++++++++---
+ modelx/export/exporter.py          | 21 ++++++++++++++-
+ modelx/tests/export/test_export.py | 43 ++++++++++++++++++++++++++++++
+ 3 files changed, 101 insertions(+), 4 deletions(-)
+
+diff --git a/modelx/export/_mx_sys.py b/modelx/export/_mx_sys.py
+index 98400a4..e590eae 100644
+--- a/modelx/export/_mx_sys.py
++++ b/modelx/export/_mx_sys.py
+@@ -64,7 +64,7 @@ class BaseModel(BaseParent):
+         p = self.path / '_mx_pickled'
+         if p.exists():
+             with open(p, mode='rb') as f:
+-                pickle_data = pickle.load(f)
++                pickle_data = DataUnpickler(f, io_data).load()
+         else:
+             pickle_data = {}
+ 
+@@ -116,6 +116,20 @@ class BaseSpace(BaseParent):
+         return obj
+ 
+ 
++class DataUnpickler(pickle.Unpickler):
++    """Unpickle classes defined in user modules from the modules in io_data"""
++
++    def __init__(self, file, io_data):
++        super().__init__(file)
++        self.io_data = io_data
++
++    def persistent_load(self, pid):
++        if pid[0] == "ModuleAttr":
++            _, key, name = pid
++            return getattr(self.io_data[key], name)
++        raise pickle.UnpicklingError("unsupported persistent object")
++
++
+ class MiniBaseSharedIO:
+ 
+     def __init__(self, path, load_from, kwargs):
+@@ -188,12 +202,33 @@ class MiniPandasData(MiniBaseIOSpec):
+             self._value._mx_dataclient = self
+ 
+ 
++class MiniModuleIO(MiniBaseSharedIO):
++
++    def load_io(self, root):
++        pass
++
++
++class MiniModuleData(MiniBaseIOSpec):
++
++    def load_value(self):
++        # Same as ModuleIO._load_module in modelx
++        from importlib.machinery import SourceFileLoader
++        from importlib.util import spec_from_loader, module_from_spec
++        loader = SourceFileLoader(
++            "<unnamed module>", path=str(self._io.load_from))
++        module = module_from_spec(spec_from_loader(loader.name, loader))
++        loader.exec_module(module)
++        return module
++
++
+ io_types = {
+-    'PandasIO': MiniPandasIO
++    'PandasIO': MiniPandasIO,
++    'ModuleIO': MiniModuleIO
+ }
+ 
+ 
+ iospec_types = {
+-    'PandasData': MiniPandasData
++    'PandasData': MiniPandasData,
++    'ModuleData': MiniModuleData
+ }
+ 
+diff --git a/modelx/export/exporter.py b/modelx/export/exporter.py
+index c768a21..a775edd 100644
+--- a/modelx/export/exporter.py
++++ b/modelx/export/exporter.py
+@@ -35,6 +35,7 @@ from modelx.core.space import BaseSpace, DynamicSpace
+ from modelx.core.cells import Cells
+ from modelx.serialize.ziputil import write_str_utf8, copy_file
+ from modelx.core.util import abs_to_rel_tuple
++from modelx.io.moduleio import module_classes
+ 
+ from . import _mx_sys
+ from .transformer import (
+@@ -309,8 +310,26 @@ class DataManager:
+ 
+     def pickle(self, path):
+         if self.pickle_data:
++            classes = module_classes(self.iospecs.values())
+             with open(path, 'wb') as f:
+-                pickle.dump(self.pickle_data, f)
++                if classes:
++                    ModuleClassPickler(f, classes).dump(self.pickle_data)
++                else:
++                    pickle.dump(self.pickle_data, f)
++
++
++class ModuleClassPickler(pickle.Pickler):
++    """Pickle classes defined in user modules by the modules' io_data keys"""
++
++    def __init__(self, file, classes):
++        super().__init__(file)
++        self.classes = classes
++
++    def persistent_id(self, obj):
++        if id(obj) in self.classes:
++            spec, name = self.classes[id(obj)]
++            return "ModuleAttr", id(spec.value), name
++        return None
+ 
+ 
+ class ParentTranslator:
+diff --git a/modelx/tests/export/test_export.py b/modelx/tests/export/test_export.py
+index c7f0beb..1d79bcb 100644
+--- a/modelx/tests/export/test_export.py
++++ b/modelx/tests/export/test_export.py
+@@ -101,6 +101,49 @@ def test_pickle(tmp_path):
+         m.close()
+ 
+ 
++LABELS_SOURCE = """\
++from enum import IntEnum
++
++
++class Plan(IntEnum):
++    T10 = 0
++    T20 = 1
++"""
++
++
++def test_module_and_module_class(tmp_path):
++    """A user module (new_module) and References to its classes,
++    directly and inside a pickled value, are exported."""
++    src = tmp_path / 'labels_src.py'
++    src.write_text(LABELS_SOURCE, encoding='utf-8')
++
++    m = mx.new_model('ModuleClassSample')
++    s = m.new_space('Space1')
++    m.new_module(name='labels', path='labels.py', module=src)
++    s.Plan = m.labels.Plan
++    s.terms = {m.labels.Plan.T10: 10, m.labels.Plan.T20: 20}
++    s.new_cells('term', formula=lambda p: terms[p])
++    s.new_cells('t20', formula=lambda: term(Plan.T20))
++
++    nomx_path = tmp_path / 'model'
++    Exporter(m, nomx_path / 'ModuleClassSample').export()
++    pkg = nomx_path / 'ModuleClassSample'
++    assert (pkg / 'labels.py').read_text(encoding='utf-8') == LABELS_SOURCE
++    assert 'return self.term(self.Plan.T20)' in (
++        pkg / '_mx_classes.py').read_text(encoding='utf-8')
++
++    try:
++        sys.path.insert(0, str(nomx_path))
++        from ModuleClassSample import mx_model
++        assert mx_model.Space1.Plan is mx_model.labels.Plan
++        assert all(type(k) is mx_model.Space1.Plan
++                   for k in mx_model.Space1.terms)
++        assert mx_model.Space1.t20() == 20
++    finally:
++        sys.path.pop(0)
++        m.close()
++
++
+ def test_subscript(tmp_path):
+     nomx_path = tmp_path / 'model'
+     m = mx.read_model(sample_dir / 'SampleSubscript')
+-- 
+2.43.0
+

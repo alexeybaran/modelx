@@ -1,0 +1,37 @@
+From c13de875cd8fe5b919479d2f6da49ed4398e095a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 20:00:49 +0000
+Subject: [PATCH 3/3] Note saved and exported module classes in the release
+ notes
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019ikg7LzyawH1Pt5X2iUgyW
+---
+ doc/source/releases/relnotes_v0_34_0.rst | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/doc/source/releases/relnotes_v0_34_0.rst b/doc/source/releases/relnotes_v0_34_0.rst
+index d9329ad..cf831b0 100644
+--- a/doc/source/releases/relnotes_v0_34_0.rst
++++ b/doc/source/releases/relnotes_v0_34_0.rst
+@@ -16,6 +16,17 @@ Anaconda users should use the ``conda`` command instead::
+ Enhancements
+ ============
+ 
++* A Reference whose value is a class defined at the top level of a module
++  of the model (:meth:`~modelx.core.model.Model.new_module`), or holds
++  one, such as a member of an :class:`~enum.Enum` defined there, is now
++  saved by :func:`~modelx.write_model` and exported by
++  :func:`~modelx.export_model`; both raised :obj:`pickle.PicklingError`
++  before. The saved model refers to the class by its module and name, so
++  a read model uses the class of the module it reads. Functions and
++  nested classes of such a module still raise :obj:`pickle.PicklingError`.
++  modelx 0.33 reads a model saved this way with a warning and sets the
++  affected References to :obj:`None`.
++
+ * Tools can tell what a value is from the name of its class
+   (:ref:`toolapi-kinds`). A tool first checks that
+   ``type(v).__module__`` is a str that starts with ``"modelx."``,
+-- 
+2.43.0
+
