@@ -376,16 +376,28 @@ class DataManager:
 
     def __init__(self, model: Model):
         self.model = model
-        self.iospecs = {id(spec.value): spec for spec in model.iospecs}
+        # Keys written to the exported package are running numbers in a
+        # stable order, not id() values, so that exporting the same model
+        # twice writes the same files. IOSpecs are numbered in the order of
+        # Model.iospecs; pickled values in the order the translators first
+        # ask for them, which follows the model's traversal.
+        self.iospecs = {}       # key: spec
+        self._iospec_keys = {}  # id(spec.value): key
+        for key, spec in enumerate(model.iospecs):
+            self.iospecs[key] = spec
+            self._iospec_keys[id(spec.value)] = key
         self.ios = {id(v): v for v in mxsys.iomanager.get_ios(model).values()}
-        self.pickle_data = {}   # id(value): value
+        self.pickle_data = {}   # key: value
+        self._pickle_keys = {}  # id(value): key, values held by pickle_data
 
     def get_code(self, value):
-        key = id(value)
-        if key in self.iospecs:
+        key = self._iospec_keys.get(id(value))
+        if key is not None:
             return f"io_data[{key}]"
         else:   # pickle
-            if key not in self.pickle_data:
+            key = self._pickle_keys.get(id(value))
+            if key is None:
+                key = self._pickle_keys[id(value)] = len(self.pickle_data)
                 self.pickle_data[key] = value
             else:
                 assert value is self.pickle_data[key]
@@ -421,7 +433,8 @@ class DataManager:
             classes = module_classes(self.iospecs.values())
             with open(path, 'wb') as f:
                 if classes:
-                    ModuleClassPickler(f, classes).dump(self.pickle_data)
+                    ModuleClassPickler(f, classes, self._iospec_keys).dump(
+                        self.pickle_data)
                 else:
                     pickle.dump(self.pickle_data, f)
 
@@ -429,14 +442,15 @@ class DataManager:
 class ModuleClassPickler(pickle.Pickler):
     """Pickle classes defined in user modules by the modules' io_data keys"""
 
-    def __init__(self, file, classes):
+    def __init__(self, file, classes, iospec_keys):
         super().__init__(file)
         self.classes = classes
+        self.iospec_keys = iospec_keys
 
     def persistent_id(self, obj):
         if id(obj) in self.classes:
             spec, name = self.classes[id(obj)]
-            return "ModuleAttr", id(spec.value), name
+            return "ModuleAttr", self.iospec_keys[id(spec.value)], name
         return None
 
 

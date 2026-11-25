@@ -164,6 +164,14 @@ Backward Incompatible Changes
 Bug Fixes
 ============
 
+* An exported model no longer depends on memory addresses. The exporter
+  wrote the :func:`id` of each pickled value and of each IOSpec value as
+  its key in the package, so two exports of one model differed. The keys
+  are now running numbers in the order of the model, and exporting the
+  same model twice writes the same Python modules and the same pickle
+  file. Excel files that openpyxl writes still record the time they
+  were written.
+
 * :meth:`Cells.values<modelx.core.cells.Cells.values>` and
   :meth:`Cells.items<modelx.core.cells.Cells.items>` now return the stored
   values of a Cells with one parameter whose argument is a tuple, and of a
