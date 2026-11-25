@@ -38,6 +38,7 @@ from modelx.core.space import BaseSpace, DynamicSpace
 from modelx.core.cells import Cells
 from modelx.serialize.ziputil import write_str_utf8, copy_file
 from modelx.core.util import abs_to_rel_tuple
+from modelx.io.moduleio import module_classes
 
 from . import _mx_sys
 from .transformer import (
@@ -417,8 +418,26 @@ class DataManager:
 
     def pickle(self, path):
         if self.pickle_data:
+            classes = module_classes(self.iospecs.values())
             with open(path, 'wb') as f:
-                pickle.dump(self.pickle_data, f)
+                if classes:
+                    ModuleClassPickler(f, classes).dump(self.pickle_data)
+                else:
+                    pickle.dump(self.pickle_data, f)
+
+
+class ModuleClassPickler(pickle.Pickler):
+    """Pickle classes defined in user modules by the modules' io_data keys"""
+
+    def __init__(self, file, classes):
+        super().__init__(file)
+        self.classes = classes
+
+    def persistent_id(self, obj):
+        if id(obj) in self.classes:
+            spec, name = self.classes[id(obj)]
+            return "ModuleAttr", id(spec.value), name
+        return None
 
 
 class ParentTranslator:

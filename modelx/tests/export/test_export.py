@@ -101,6 +101,49 @@ def test_pickle(tmp_path):
         m.close()
 
 
+LABELS_SOURCE = """\
+from enum import IntEnum
+
+
+class Plan(IntEnum):
+    T10 = 0
+    T20 = 1
+"""
+
+
+def test_module_and_module_class(tmp_path):
+    """A user module (new_module) and References to its classes,
+    directly and inside a pickled value, are exported."""
+    src = tmp_path / 'labels_src.py'
+    src.write_text(LABELS_SOURCE, encoding='utf-8')
+
+    m = mx.new_model('ModuleClassSample')
+    s = m.new_space('Space1')
+    m.new_module(name='labels', path='labels.py', module=src)
+    s.Plan = m.labels.Plan
+    s.terms = {m.labels.Plan.T10: 10, m.labels.Plan.T20: 20}
+    s.new_cells('term', formula=lambda p: terms[p])
+    s.new_cells('t20', formula=lambda: term(Plan.T20))
+
+    nomx_path = tmp_path / 'model'
+    Exporter(m, nomx_path / 'ModuleClassSample').export()
+    pkg = nomx_path / 'ModuleClassSample'
+    assert (pkg / 'labels.py').read_text(encoding='utf-8') == LABELS_SOURCE
+    assert 'return self.term(self.Plan.T20)' in (
+        pkg / '_mx_classes.py').read_text(encoding='utf-8')
+
+    try:
+        sys.path.insert(0, str(nomx_path))
+        from ModuleClassSample import mx_model
+        assert mx_model.Space1.Plan is mx_model.labels.Plan
+        assert all(type(k) is mx_model.Space1.Plan
+                   for k in mx_model.Space1.terms)
+        assert mx_model.Space1.t20() == 20
+    finally:
+        sys.path.pop(0)
+        m.close()
+
+
 def test_subscript(tmp_path):
     nomx_path = tmp_path / 'model'
     m = mx.read_model(sample_dir / 'SampleSubscript')

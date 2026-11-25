@@ -116,7 +116,7 @@ class BaseModel(BaseParent):
         p = self.path / '_mx_pickled'
         if p.exists():
             with open(p, mode='rb') as f:
-                pickle_data = pickle.load(f)
+                pickle_data = DataUnpickler(f, io_data).load()
         else:
             pickle_data = {}
 
@@ -533,6 +533,20 @@ def _mx_collect_policy_outputs(base, coords, loop_name, names, args):
         scratch.clear()
 
 
+class DataUnpickler(pickle.Unpickler):
+    """Unpickle classes defined in user modules from the modules in io_data"""
+
+    def __init__(self, file, io_data):
+        super().__init__(file)
+        self.io_data = io_data
+
+    def persistent_load(self, pid):
+        if pid[0] == "ModuleAttr":
+            _, key, name = pid
+            return getattr(self.io_data[key], name)
+        raise pickle.UnpicklingError("unsupported persistent object")
+
+
 class MiniBaseSharedIO:
 
     def __init__(self, path, load_from, kwargs):
@@ -605,12 +619,33 @@ class MiniPandasData(MiniBaseIOSpec):
             self._value._mx_dataclient = self
 
 
+class MiniModuleIO(MiniBaseSharedIO):
+
+    def load_io(self, root):
+        pass
+
+
+class MiniModuleData(MiniBaseIOSpec):
+
+    def load_value(self):
+        # Same as ModuleIO._load_module in modelx
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import spec_from_loader, module_from_spec
+        loader = SourceFileLoader(
+            "<unnamed module>", path=str(self._io.load_from))
+        module = module_from_spec(spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        return module
+
+
 io_types = {
-    'PandasIO': MiniPandasIO
+    'PandasIO': MiniPandasIO,
+    'ModuleIO': MiniModuleIO
 }
 
 
 iospec_types = {
-    'PandasData': MiniPandasData
+    'PandasData': MiniPandasData,
+    'ModuleData': MiniModuleData
 }
 
