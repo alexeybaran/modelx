@@ -240,6 +240,99 @@ def test_module_roundtrip(tmp_path, close_new_models):
     assert entries == [(1, "ModuleData", 1, "modules/foo", {}, {})]
 
 
+LABELS_SOURCE = """\
+from enum import IntEnum
+
+
+class Plan(IntEnum):
+    T10 = 0
+    T20 = 1
+
+
+class Basis:
+    rate = 0.01
+"""
+
+
+def _make_module_class_model(tmp_path):
+    src = tmp_path / "labels_src.py"
+    src.write_text(LABELS_SOURCE, encoding="utf-8")
+    m = mx.new_model("V8ModuleClass")
+    s = m.new_space("Space1")
+    m.new_module(name="labels", path="labels.py", module=src)
+    s.Plan = m.labels.Plan
+    s.Basis = m.labels.Basis
+    s.terms = {m.labels.Plan.T10: 10, m.labels.Plan.T20: 20}
+    s.new_cells("term", formula=lambda p: terms[p])
+    s.new_cells("t10", formula=lambda: term(Plan.T10))
+    return m
+
+
+@pytest.mark.parametrize("save_meth", ["write", "zip"])
+def test_module_class_ref_roundtrip(tmp_path, close_new_models, save_meth):
+    """A Reference to a class defined in a user module (new_module) is
+    pickled by the module's spec and the class name, and restored from
+    the module the model loads."""
+    m = _make_module_class_model(tmp_path)
+    assert m.Space1.t10() == 10
+
+    path = tmp_path / "model"
+    getattr(m, save_meth)(path)
+    m.close()
+
+    m2 = mx.read_model(path)
+    s2 = m2.Space1
+    assert s2.Plan is m2.labels.Plan
+    assert s2.Basis is m2.labels.Basis
+    assert all(type(k) is s2.Plan for k in s2.terms)
+    assert s2.t10() == 10
+
+    # Saving again keeps the same form
+    path2 = tmp_path / "model2"
+    getattr(m2, save_meth)(path2)
+    m2.close()
+    m3 = mx.read_model(path2)
+    assert m3.Space1.Plan is m3.labels.Plan
+    assert m3.Space1.t10() == 10
+
+
+def test_module_class_ref_follows_edited_module(tmp_path, close_new_models):
+    """A copy of the model uses the classes of its own module file."""
+    m = _make_module_class_model(tmp_path)
+    m.write(tmp_path / "model")
+    m.close()
+
+    shutil.copytree(tmp_path / "model", tmp_path / "copy")
+    module_file = tmp_path / "copy" / "labels.py"
+    module_file.write_text(
+        LABELS_SOURCE.replace("T20 = 1", "T20 = 1\n    T30 = 2"),
+        encoding="utf-8")
+
+    m2 = mx.read_model(tmp_path / "copy")
+    assert m2.Space1.Plan is m2.labels.Plan
+    assert m2.Space1.Plan.T30 == 2
+    assert m2.Space1.t10() == 10
+
+
+def test_module_class_ref_missing_class(tmp_path, close_new_models):
+    """A class removed from the module file is lost like other
+    unrestorable pickled values: a warning, and the rest loads."""
+    m = _make_module_class_model(tmp_path)
+    m.write(tmp_path / "model")
+    m.close()
+
+    module_file = tmp_path / "model" / "labels.py"
+    module_file.write_text(
+        LABELS_SOURCE.replace("class Basis:", "class Renamed:"),
+        encoding="utf-8")
+
+    with pytest.warns(UserWarning):
+        m2 = mx.read_model(tmp_path / "model")
+    assert m2.Space1.Plan is m2.labels.Plan
+    assert m2.Space1.t10() == 10
+    assert m2.Space1.Basis is None
+
+
 def test_value_shared_by_ref_and_cells_input(tmp_path, sample_df,
                                              close_new_models):
     """A spec value that is also a cells input is stored once and its

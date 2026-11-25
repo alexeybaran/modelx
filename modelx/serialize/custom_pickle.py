@@ -3,6 +3,7 @@ import pathlib
 from modelx.core.system import mxsys
 from modelx.core.base import NullImpl, null_impl
 from modelx.io.baseio import BaseSharedIO, IOManager, BaseIOSpec
+from modelx.io.moduleio import module_classes
 from modelx.core.node import BaseNode, ObjectNode, get_node, ItemNode, OBJ, KEY
 from . import ziputil
 
@@ -82,6 +83,7 @@ class ModelPickler(pickle.Pickler):
     def __init__(self, file, writer):
         super().__init__(file)
         self.writer = writer
+        self.module_classes = module_classes(writer.model.iospecs)
 
     def spec_id(self, obj):
         # The id emitted for a BaseIOSpec must match a key of the
@@ -100,6 +102,10 @@ class ModelPickler(pickle.Pickler):
         data_value_id = self.data_value_id(obj)
         if data_value_id is not None:
             return "DataValue", data_value_id
+        elif id(obj) in self.module_classes:
+            # A class defined in a user module (new_module)
+            spec, name = self.module_classes[id(obj)]
+            return "ModuleAttr", self.spec_id(spec), name
         elif isinstance(obj, BaseIOSpec):
             return "BaseIOSpec", self.spec_id(obj)
         elif isinstance(obj, BaseSharedIO):
@@ -176,6 +182,10 @@ class ModelUnpickler(pickle.Unpickler):
         if pid[0] == "DataValue":
             _, sp_id = pid
             return self._find_iospec(sp_id).value
+
+        elif pid[0] == "ModuleAttr":
+            _, sp_id, name = pid
+            return getattr(self._find_iospec(sp_id).value, name)
 
         elif pid[0] in ("BaseIOSpec", "BaseDataSpec"):  # renamed in v0.20
             _, sp_id = pid

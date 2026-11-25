@@ -136,3 +136,25 @@ class ModuleData(BaseIOSpec):
 
     def __repr__(self):
         return "<ModuleData path=%s>" % repr(str(self._io.path.as_posix()))
+
+
+def module_classes(specs):
+    """Map the classes defined in user modules to their modules
+
+    Returns a dict mapping the id of each class defined at the top level
+    of the module held by a :class:`ModuleData` in ``specs`` to a tuple
+    of the :class:`ModuleData` and the class name. Such a class cannot be
+    pickled by reference, as its module is not importable, so picklers
+    refer to it by the spec and the name instead.
+    """
+    result = {}
+    for spec in specs:
+        module = spec.value if isinstance(spec, ModuleData) else None
+        if module is None:
+            continue
+        for name, value in vars(module).items():
+            if (isinstance(value, type)
+                    and value.__module__ == module.__name__
+                    and value.__qualname__ == name):
+                result.setdefault(id(value), (spec, name))
+    return result
