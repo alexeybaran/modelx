@@ -1,0 +1,145 @@
+diff --git a/modelx/core/collect.py b/modelx/core/collect.py
+index 8399402..6edf3c7 100644
+--- a/modelx/core/collect.py
++++ b/modelx/core/collect.py
+@@ -65,11 +65,16 @@ class CollectResult:
+         self._fields = callable_fields(fields)
+ 
+     def __getattr__(self, name):
++        if name == '_fields':       # not yet set: copy and pickle probe a bare instance
++            raise AttributeError(name)
+         try:
+             return self._fields[name]
+         except KeyError as exc:
+             raise AttributeError(name) from exc
+ 
++    def __reduce__(self):
++        return type(self), (self._fields,)
++
+     def __dir__(self):
+         return sorted(set(super().__dir__()) | set(self._fields))
+ 
+diff --git a/modelx/core/itemspaces.py b/modelx/core/itemspaces.py
+index 2d462b1..ffe37a8 100644
+--- a/modelx/core/itemspaces.py
++++ b/modelx/core/itemspaces.py
+@@ -75,10 +75,11 @@ class ItemSpaceManager:
+         dirty_bases = set(changes.dirty_bases)
+         # collect() has discarded its ItemSpaces: invalidate using the small
+         # template-ID closure recorded by its runner, not a retained tree.
+-        for space in self.model.yield_spaces():
+-            runner = space.collect_runner
+-            if runner is not None:
+-                runner.invalidate_templates(dirty | dirty_bases)
++        if self.model.has_collect:
++            for space in self.model.yield_spaces():
++                runner = space.collect_runner
++                if runner is not None:
++                    runner.invalidate_templates(dirty | dirty_bases)
+         if not dirty and not dirty_bases:
+             return
+ 
+diff --git a/modelx/core/model.py b/modelx/core/model.py
+index 8b2c5d7..b5378b5 100644
+--- a/modelx/core/model.py
++++ b/modelx/core/model.py
+@@ -1243,6 +1243,7 @@ class ModelImpl(*_model_impl_base):
+         "path",
+         "valreg",
+         "collect_workers",
++        "has_collect",
+         "spmgr"      # shadows Impl.spmgr property; the SpaceManager home
+     ) + get_mixin_slots(*_model_impl_base)
+ 
+@@ -1273,6 +1274,7 @@ class ModelImpl(*_model_impl_base):
+         self.namespace = ModelNamespace(self)
+         self.allow_none = False
+         self.collect_workers = None
++        self.has_collect = False
+         self.valreg = ValueRegistry(self, system.iomanager)
+ 
+     def rename(self, name):
+diff --git a/modelx/core/space.py b/modelx/core/space.py
+index 7addb00..0c30adc 100644
+--- a/modelx/core/space.py
++++ b/modelx/core/space.py
+@@ -2369,6 +2369,7 @@ class UserSpaceImpl(*_user_space_impl_base):
+         from modelx.core.collect import CollectRunner, resolve_collect_over
+         self.collect_over_spec = resolve_collect_over(self, collect_over)
+         self.collect_runner = CollectRunner(self)
++        self.model.has_collect = True
+ 
+     def collect(self, args, kwargs):
+         if self.collect_runner is None:
+diff --git a/modelx/export/_mx_sys.py b/modelx/export/_mx_sys.py
+index 2ff19e6..d998c24 100644
+--- a/modelx/export/_mx_sys.py
++++ b/modelx/export/_mx_sys.py
+@@ -178,11 +178,16 @@ class CollectResult:
+         self._fields = callable_fields(fields)
+ 
+     def __getattr__(self, name):
++        if name == '_fields':       # not yet set: copy and pickle probe a bare instance
++            raise AttributeError(name)
+         try:
+             return self._fields[name]
+         except KeyError as exc:
+             raise AttributeError(name) from exc
+ 
++    def __reduce__(self):
++        return type(self), (self._fields,)
++
+     def __dir__(self):
+         return sorted(set(super().__dir__()) | set(self._fields))
+ 
+diff --git a/modelx/export/exporter.py b/modelx/export/exporter.py
+index 1e2c946..ddde37c 100644
+--- a/modelx/export/exporter.py
++++ b/modelx/export/exporter.py
+@@ -246,8 +246,14 @@ def _dynamic_ref_names(space, source, definition, ref_names):
+     for node in nodes:
+         if isinstance(node, ast.Return):
+             for params in mappings(node.value):
+-                if params.keys() - {'refs'}:
+-                    raise ValueError(error)
++                for key in params.keys() - {'refs'}:
++                    # 'base'/'bases' naming the Space itself is the default base
++                    value = params[key]
++                    if key == 'bases' and isinstance(value, (ast.List, ast.Tuple)) and len(value.elts) == 1:
++                        value = value.elts[0]
++                    if not (key in ('base', 'bases') and isinstance(value, ast.Name)
++                            and value.id in ('_space', '_self')):
++                        raise ValueError(error)
+                 for refs in mappings(params.get('refs')):
+                     keys.update(refs)
+ 
+@@ -1052,7 +1058,7 @@ class SpaceTranslator(ParentTranslator):
+                     result = self._parent._mx_space_formula(*args, **kwargs)
+                     if result is None:
+                         return
+-                    if not isinstance(result, dict) or result.keys() - {'refs'}:
++                    if not isinstance(result, dict) or result.keys() - {'refs', 'base', 'bases'}:
+                         raise ValueError('Exported Space formula must return only dynamic References')
+                     refs = result.get('refs')
+                     if refs is None:
+diff --git a/modelx/serialize/serializer_8.py b/modelx/serialize/serializer_8.py
+index 63721fb..2883289 100644
+--- a/modelx/serialize/serializer_8.py
++++ b/modelx/serialize/serializer_8.py
+@@ -329,6 +329,16 @@ class ModelWriter(serializer_7.ModelWriter):
+         """
+         for spec in self.model.iospecs:
+             _spec_entry(0, spec)
++        for space in self.model._impl.yield_spaces():
++            if space.collect_over_spec is not None:
++                for domain in space.collect_over_spec.values():
++                    if not (domain.ref_parent is space
++                            or (domain.source is not None
++                                and getattr(domain.source, "parent", None) is space
++                                and getattr(domain.source, "name", None) in space.cells)):
++                        raise ValueError(
++                            "collect serialization requires a domain Cell or Reference "
++                            "owned by the collection Space")
+ 
+     def write_model(self):
+ 
