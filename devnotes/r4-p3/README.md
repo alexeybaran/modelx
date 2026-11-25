@@ -45,8 +45,8 @@ changes besides the keys.
 
 | Tree | Python 3.13 | Python 3.14.6t, `PYTHON_GIL=0`, `test_assets` deselected |
 |---|---|---|
-| stored-classes | 1877 passed, 7 skipped, 1 failed | see below |
-| + deterministic-export | 1878 passed, 7 skipped, 1 failed | see below |
+| stored-classes | 1877 passed, 7 skipped, 1 failed | 1877 passed, 6 skipped, 1 failed |
+| + deterministic-export | 1878 passed, 7 skipped, 1 failed | 1878 passed, 6 skipped, 1 failed |
 
 The one failure in every tree is `lifelib/test_deserializer.py`, which fails
 the same way on upstream main against lifelib main 20d4dae (the CI pull
