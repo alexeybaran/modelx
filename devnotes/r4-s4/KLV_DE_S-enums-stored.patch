@@ -1,0 +1,146 @@
+diff --git a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Data/__init__.py b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Data/__init__.py
+index 3caceeaf..f5f51321 100644
+--- a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Data/__init__.py
++++ b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Data/__init__.py
+@@ -242,6 +242,6 @@ deckrv_file = "deckrv_table.csv"
+ 
+ pd = ("Module", "pandas")
+ 
+-Sex = ("Pickle", 1)
++Sex = ("Pickle", 2)
+ 
+-PremFreq = ("Pickle", 2)
++PremFreq = ("Pickle", 3)
+diff --git a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Projection/__init__.py b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Projection/__init__.py
+index fd7b42fa..bfa7f9b2 100644
+--- a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Projection/__init__.py
++++ b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/Projection/__init__.py
+@@ -2591,20 +2591,20 @@ roll_fwd_tol = 1e-10
+ 
+ pd = ("Module", "pandas")
+ 
+-Sex = ("Pickle", 1)
++Sex = ("Pickle", 2)
+ 
+-Smoker = ("Pickle", 3)
++Smoker = ("Pickle", 4)
+ 
+-PremFreq = ("Pickle", 2)
++PremFreq = ("Pickle", 3)
+ 
+-UnterjaehrigForm = ("Pickle", 4)
++UnterjaehrigForm = ("Pickle", 5)
+ 
+-SurplusUse = ("Pickle", 5)
++SurplusUse = ("Pickle", 6)
+ 
+-ResTiming = ("Pickle", 6)
++ResTiming = ("Pickle", 7)
+ 
+-SurTiming = ("Pickle", 7)
++SurTiming = ("Pickle", 8)
+ 
+-PolsTiming = ("Pickle", 8)
++PolsTiming = ("Pickle", 9)
+ 
+-Kind = ("Pickle", 9)
++Kind = ("Pickle", 10)
+diff --git a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/__init__.py b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/__init__.py
+index 3d31d7ec..001cb405 100644
+--- a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/__init__.py
++++ b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/__init__.py
+@@ -144,3 +144,8 @@ _spaces = [
+     "Data",
+     "Projection"
+ ]
++
++# ---------------------------------------------------------------------------
++# References
++
++enums = ("IOSpec", 1)  # ModuleData path='enums.py'
+\ No newline at end of file
+diff --git a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/_data/data.pickle b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/_data/data.pickle
+index 1abcfddeb4e19541e6234ad538646138ae9e543e..797a908d443c6f5e5bf01096566ab0de689e612b 100644
+GIT binary patch
+literal 210
+zcmZo*nR=W70&1sdcr*2I`R1pT=A=57loU<zX6#`OPOX^IJ|)nbIfD_%<p?NB&2=kE
+zEd-0PfW_E?bMv!Pi@+kRU=e}Pypq(Sti;reqRe!+{Gwd292;1UE4Z|%Ag8oAv^W(k
+u$_^Ig3`#8y$;{2nO9u;bKm>tGkpwv*`UCQFkd<<QMOnNv^HM-sOZ5PDoktb`
+
+literal 237
+zcmYkzI}(C05C&k8hhXI~ta1h`8X89A06bP$Ndj(&W8;hmpc60XNldiRo!R35{@uI(
+zd@a6no41KG?KmERW68`?K?sV~pFB`s>uOZ2D+U}3&Y=XUE<g&a7D&s6fz(3HlbgYH
+ze$2_Tb*3;S5HZ2of@>hiMBf3~=$W|5<p^{tpe1bLo`fxYQ>-&h1J^27U@0&Z?Li$-
+bplqzHteB&pg!V1%`QK4w$V*Vx=0meL9sXC(
+
+diff --git a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/_data/iospecs.py b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/_data/iospecs.py
+new file mode 100644
+index 00000000..2e3798c2
+--- /dev/null
++++ b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/_data/iospecs.py
+@@ -0,0 +1,3 @@
++# modelx: iospecs
++# (key, class, version, path, io_args, spec_args)
++(1, 'ModuleData', 1, 'enums.py', {}, {})
+diff --git a/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/enums.py b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/enums.py
+new file mode 100644
+index 00000000..e6d80a33
+--- /dev/null
++++ b/lifelib/libraries/delib/products/kapitallebensversicherung/KLV_DE_S/enums.py
+@@ -0,0 +1,56 @@
++"""Closed sets used by the KLV_DE_S saved model."""
++
++from enum import IntEnum
++
++
++class Sex(IntEnum):
++    M = 0
++    F = 1
++
++
++class Smoker(IntEnum):
++    N = 0
++    S = 1
++
++
++class PremFreq(IntEnum):
++    annual = 0
++    half_yearly = 1
++    quarterly = 2
++    monthly = 3
++
++
++class UnterjaehrigForm(IntEnum):
++    echt = 0
++    unecht = 1
++
++
++class SurplusUse(IntEnum):
++    ansammlung = 0
++    bonus = 1
++    beitragsverrechnung = 2
++
++
++class ResTiming(IntEnum):
++    BEF_PREM = 0
++    AFT_PREM = 1
++    AFT_INT = 2
++
++
++class SurTiming(IntEnum):
++    BEF_INT = 0
++    AFT_INT = 1
++    AFT_CREDIT = 2
++
++
++class PolsTiming(IntEnum):
++    BEF_DECR = 0
++    AFT_MORT = 1
++    AFT_LAPSE = 2
++
++
++class Kind(IntEnum):
++    DEATH = 0
++    MATURITY = 1
++    LAPSE = 2
++    ALL = 3
