@@ -241,14 +241,34 @@ def _dynamic_ref_names(space, source, definition, ref_names):
         else:
             raise ValueError(error)
 
+    def is_space(expr):
+        return isinstance(expr, ast.Name) and expr.id == '_space'
+
+    def names_itself(key, expr):
+        # The Space itself as the base is the base an ItemSpace has without
+        # a formula: {'base': _space}, {'bases': _space} or {'bases': [_space]}.
+        if key == 'bases' and isinstance(expr, (ast.List, ast.Tuple)) and len(expr.elts) == 1:
+            expr = expr.elts[0]
+        if not is_space(expr):
+            return False
+        space_uses.add(expr)
+        return True
+
+    space_uses = set()
     keys = set()
     for node in nodes:
         if isinstance(node, ast.Return):
             for params in mappings(node.value):
-                if params.keys() - {'refs'}:
+                if params.keys() - {'refs', 'base', 'bases'} or len(params.keys() & {'base', 'bases'}) > 1:
+                    raise ValueError(error)
+                if not all(names_itself(key, params[key]) for key in params.keys() & {'base', 'bases'}):
                     raise ValueError(error)
                 for refs in mappings(params.get('refs')):
                     keys.update(refs)
+    if space_uses:
+        symbol = scope.lookup('_space') if '_space' in scope.get_identifiers() else None
+        if symbol is None or not symbol.is_global() or symbol.is_declared_global():
+            raise ValueError(error)
 
     # A mapping can be changed by other uses or bound by non-assignment syntax
     # such as an import, an exception target or a pattern capture.
@@ -995,8 +1015,14 @@ class SpaceTranslator(ParentTranslator):
                     result = self._parent._mx_space_formula(*args, **kwargs)
                     if result is None:
                         return
-                    if not isinstance(result, dict) or result.keys() - {'refs'}:
+                    if not isinstance(result, dict) or result.keys() - {'refs', 'base', 'bases'}:
                         raise ValueError('Exported Space formula must return only dynamic References')
+                    for key in result.keys() & {'base', 'bases'}:
+                        base = result[key]
+                        if key == 'bases' and isinstance(base, (list, tuple)) and len(base) == 1:
+                            base = base[0]
+                        if base is not self._parent._space:
+                            raise ValueError('Exported Space formula must name the Space itself as its base')
                     refs = result.get('refs')
                     if refs is None:
                         return

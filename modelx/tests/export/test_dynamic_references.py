@@ -84,3 +84,63 @@ def test_unsupported_dynamic_references_fail_at_export(formula, tmp_path):
             model.export(tmp_path / "unsupported_refs")
     finally:
         model.close()
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        'lambda i: {"base": _space}',
+        'lambda i: {"bases": _space}',
+        'lambda i: {"bases": [_space]}',
+        'lambda i: dict(base=_space)',
+        'lambda i: {"base": _space, "refs": {"scale": i * 10}}',
+        '''
+def formula(i):
+    if i < 0:
+        return {"bases": (_space,), "refs": {"offset": -i}}
+    return {"base": _space}
+''',
+    ],
+    ids=["base", "bases", "bases-list", "dict-call", "base-and-refs", "bases-tuple-branches"],
+)
+@pytest.mark.parametrize("use_slots", [True, False])
+def test_space_itself_as_base_matches_live(formula, use_slots, tmp_path, monkeypatch):
+    # Naming the Space itself as the base is what an ItemSpace has without a
+    # formula, so it exports as before dynamic References were supported.
+    model = mx.new_model()
+    try:
+        space = model.new_space("S", formula=formula.strip(), refs={"scale": 1, "offset": 1})
+        space.new_cells("value", "lambda: scale + offset")
+        package = f"identity_base_{tmp_path.name.replace('-', '_')}"
+        model.export(tmp_path / package, use_slots=use_slots)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        exported = importlib.import_module(package).mx_model
+        for i in (-3, 0, 1, 2, 3):
+            assert exported.S[i].value() == space[i].value()
+    finally:
+        model.close()
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        'lambda i: {"base": Other}',
+        'lambda i: {"bases": [_space, Other]}',
+        '''
+def formula(i):
+    _space = Other
+    return {"base": _space}
+''',
+        'lambda i, _space=None: {"base": _space}',
+    ],
+    ids=["other-space", "two-bases", "rebound-space", "parameter-space"],
+)
+def test_other_base_fails_at_export(formula, tmp_path):
+    model = mx.new_model()
+    try:
+        other = model.new_space("Other")
+        model.new_space("S", formula=formula.strip(), refs={"Other": other})
+        with pytest.raises(ValueError, match=r"Cannot export Space formula for .*\.S:.*statically named"):
+            model.export(tmp_path / "other_base")
+    finally:
+        model.close()
