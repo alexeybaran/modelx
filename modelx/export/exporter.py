@@ -324,6 +324,9 @@ class Exporter:
                 que.append(child)
 
     def export(self):
+        collect_spaces = self.model._impl.collect_spaces
+        for space in collect_spaces:
+            space.collect_runner.check()
         io_manager = DataManager(self.model)
 
         # Create self.path dir and Write Model module
@@ -334,6 +337,8 @@ class Exporter:
 
         # Write _mx_sys.py
         copy_file(this_dir / '_mx_sys.py', self.path / '_mx_sys.py')
+        if collect_spaces:
+            copy_file(this_dir / '_mx_collect.py', self.path / '_mx_collect.py')
         
         # Write _mx_macros.py if macros exist
         if self.model.macros:
@@ -828,6 +833,42 @@ class SpaceTranslator(ParentTranslator):
 
     """)
 
+    # The ItemSpace that collect() reads at one coordinate: an existing
+    # one, or a new root built as __call__ builds it but not stored.
+    collect_methods = textwrap.dedent("""\
+    def _mx_collect_item(self, {params}):
+        _mx_root = self._mx_itemspaces.get({idx_args})
+        if _mx_root is not None:
+            return _mx_root
+        _mx_base = self
+        _mx_root = _mx_base.__class__(self)
+        for _mx_s, _mx_b in zip(_mx_root._mx_walk(), _mx_base._mx_walk()):
+            _mx_s._mx_copy_refs(_mx_b, _mx_base)
+            for _mx_r in self._mx_roots:
+                _mx_r._mx_copy_params(_mx_s)
+
+            self._mx_assign_params(_mx_s, {args})
+            _mx_s._mx_roots.extend(self._mx_roots)
+            _mx_s._mx_roots.append(_mx_root){dynamic_refs}
+
+        return _mx_root
+
+    def _mx_collect_run(self{other_params}):
+        return _mx_sys.collect_from_space(
+            self, {domain},
+            lambda _mx_c: self._mx_collect_item({item_args}),
+            ({other_args}), self._mx_collect_cache)
+
+    @property
+    def {method}(self):
+        # Defined on the Space only, as in modelx: not on its ItemSpaces
+        if self._mx_roots:
+            raise AttributeError(
+                "Attribute '{method}' is not in an ItemSpace of " + self._name)
+        return self._mx_collect_run
+
+    """)
+
     lock_assign = textwrap.dedent("""\
     # Lock shared by the locked Spaces
     self.{LOCK_ATTR} = self._model.{LOCK_ATTR}""").format(LOCK_ATTR=LOCK_ATTR)
@@ -1031,6 +1072,35 @@ class SpaceTranslator(ParentTranslator):
                     for name, value in refs.items():
                         setattr(self, name, value)
                 """).replace('{dynamic_refs}', repr(tuple(dynamic_refs)))
+            runner = space._impl.collect_runner
+            if runner is not None:
+                method = 'collect'
+                if ('collect' in class_names or 'collect' in inherited_params
+                        or any(normalize(name) == 'collect' for name in slot_names)):
+                    method = '_mx_collect'   # a member named collect comes first
+                itemspace_dict += '\nself._mx_collect_cache = {}'
+                slot_names.append('_mx_collect_cache')
+                class_names.update(['_mx_collect_item', '_mx_collect_run', method])
+                others = [p for p in space.formula.signature.parameters.values()
+                          if p.name != runner.parameter]
+                other_args = ', '.join(p.name for p in others) + (
+                    ',' if len(others) == 1 else '')
+                domain = ('self.%s()' if runner.domain in space.cells
+                          else 'self.%s') % runner.domain
+                itemspace_methods += self.collect_methods.format(
+                    params=attrs.param_str,
+                    idx_args=attrs.key_str,
+                    args=attrs.arg_str,
+                    dynamic_refs=('\n\n    _mx_root._mx_apply_formula(' + attrs.arg_str + ')'
+                                  if space_formula else ''),
+                    method=method,
+                    other_params=''.join(
+                        ', ' + str(p) for p in others),
+                    domain=domain,
+                    item_args=', '.join(
+                        '_mx_c' if name == runner.parameter else name
+                        for name in attrs.params),
+                    other_args=other_args)
             delitem = self.delitem_asis
         else:
             itemspace_dict = ''

@@ -116,6 +116,54 @@ class BaseSpace(BaseParent):
         return obj
 
 
+# The versions of the collect hook this runtime calls. See the page
+# "collect hook" of the modelx reference: a compiled Space class takes
+# over collect() by defining _mx_collect_hook and _mx_collect_hook_version.
+COLLECT_HOOK_VERSIONS = (1,)
+
+
+def collect_from_space(space, domain, item, args, cache):
+    """Evaluate ``collect()`` of an exported Space.
+
+    ``domain`` is the value of the domain, ``item(c)`` the ItemSpace at
+    coordinate ``c``, ``args`` the other Space parameters in signature
+    order, and ``cache`` the Space's dict of results.
+    """
+    from ._mx_collect import Accumulator, CollectResult, normalize_domain, prepare_output
+
+    coords = normalize_domain(domain)
+    key = (coords, args)
+    result = cache.get(key)
+    if result is not None:
+        return result
+
+    cls = type(space)
+    hook = getattr(cls, '_mx_collect_hook', None)
+    if hook is not None:
+        version = getattr(cls, '_mx_collect_hook_version', None)
+        if type(version) is not int or version not in COLLECT_HOOK_VERSIONS:
+            raise RuntimeError(
+                "%s.%s defines _mx_collect_hook version %r; this exported "
+                "model calls version %s" % (
+                    cls.__module__, cls.__qualname__, version,
+                    ', '.join(map(str, COLLECT_HOOK_VERSIONS))))
+        result = hook(space, coords, args)
+        if result is not None and type(result) is not CollectResult:
+            raise TypeError(
+                "_mx_collect_hook must return a CollectResult of _mx_collect "
+                "or None, not %s" % type(result).__name__)
+
+    if result is None:
+        accumulator = Accumulator()
+        for coordinate in coords:
+            root = item(coordinate)
+            outputs = prepare_output(root.collect_outputs(), (BaseMxObject,))
+            del root     # a root collect created is released here
+            accumulator.add(coordinate, outputs)
+        result = accumulator.result()
+    return cache.setdefault(key, result)
+
+
 class MiniBaseSharedIO:
 
     def __init__(self, path, load_from, kwargs):
