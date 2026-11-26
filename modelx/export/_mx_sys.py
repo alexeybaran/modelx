@@ -125,11 +125,31 @@ COLLECT_HOOK_VERSIONS = (1,)
 _SAME_DOMAIN = object()
 
 
+def release_collect_item(item):
+    """Break the links that keep a private ItemSpace tree alive."""
+    pending = [item]
+    while pending:
+        space: BaseSpace = pending.pop()
+        pending.extend(space._mx_spaces.values())
+        space._mx_spaces.clear()
+        try:
+            nested = space._mx_itemspaces
+        except AttributeError:
+            nested = None
+        if nested is not None:
+            pending.extend(nested.values())
+            nested.clear()
+        space._mx_cells.clear()
+        space._mx_roots.clear()
+        space._space = None
+        space._parent = None
+
+
 def collect_from_space(space, domain, item, args, cache):
     """Evaluate ``collect()`` of an exported Space.
 
-    ``domain`` is the value of the domain, ``item(c)`` the ItemSpace at
-    coordinate ``c``, ``args`` the other Space parameters in signature
+    ``domain`` is the value of the domain, ``item(c)`` a private ItemSpace
+    at coordinate ``c``, ``args`` the other Space parameters in signature
     order, and ``cache`` the Space's dict of results.
 
     A result is read again without normalizing the domain when the arguments
@@ -171,8 +191,11 @@ def collect_from_space(space, domain, item, args, cache):
         accumulator = Accumulator()
         for coordinate in coords:
             root = item(coordinate)
-            outputs = prepare_output(root.collect_outputs(), (BaseMxObject,))
-            del root     # a root collect created is released here
+            try:
+                outputs = prepare_output(root.collect_outputs(), (BaseMxObject,))
+            finally:
+                release_collect_item(root)
+                del root
             accumulator.add(coordinate, outputs)
         result = accumulator.result()
     result = cache.setdefault(key, result)

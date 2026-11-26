@@ -5,9 +5,10 @@ The collect hook of exported models
 
 A Space that declares ``collect()``
 (:meth:`~modelx.core.space.UserSpace.set_collect`) is exported with a
-``collect()`` method. That method evaluates the items one after another
-in Python. A compiler that builds an extension from the exported package
-can take over the evaluation, for example to run the items in parallel,
+``collect()`` method. That method evaluates temporary ItemSpaces one at a
+time in Python. Direct access and Collect use the explicitly assigned Cells
+inputs captured at export. A compiler that builds an extension from the
+exported package can take over the evaluation, for example to run the items in parallel,
 through one hook described on this page. modelx itself never defines the
 hook. Live modelx has no hook: only exported models call it.
 
@@ -36,6 +37,12 @@ attributes:
     ``_mx_collect`` module, holding the values that modelx would compute
     (see below), or :obj:`None` to leave the evaluation to modelx. An
     exception propagates to the caller of ``collect()``.
+
+The generated ``_mx_collect_item(*full_args)`` constructs a private item
+with its exported inputs. Supply the arguments in the original Space
+signature order. Release the returned item with ``_mx_sys.release_collect_item``
+after detaching its output, including when evaluation or output preparation
+raises.
 
 What the result holds
 ---------------------

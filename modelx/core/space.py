@@ -815,12 +815,12 @@ class UserSpace(BaseSpace, EditableParent):
         Outputs are copied out of the ItemSpace, so they must be data:
         a modelx object raises :obj:`TypeError`.
 
-        An ItemSpace that exists when ``collect()`` reaches its coordinate
-        is used and kept. An ItemSpace that ``collect()`` creates is deleted
-        before the next one is created, so that only one is held at a time.
-        The result is cached like a Cells value: the edits that would
-        clear the ItemSpaces, a change of the domain and a change of the
-        Space formula clear it.
+        ``collect()`` calculates each coordinate in a temporary ItemSpace
+        and releases it before starting the next coordinate. Direct access
+        and ``collect()`` use the same explicitly assigned Cells inputs and
+        maintain their own calculated values. The result is cached like a
+        Cells value and invalidated by changes to its inputs, domain,
+        external dependencies, or Space and Cells formulas.
 
         Args:
             over (dict): One parameter of the Space formula mapped to the

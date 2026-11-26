@@ -77,7 +77,7 @@ def test_exported_collect_equals_live_and_a_loop(model, tmp_path, monkeypatch, u
         assert exported.sum.cf(2) == exported.sum.cf[2]
 
 
-def test_existing_itemspaces_are_used_and_kept(model, tmp_path, monkeypatch):
+def test_exported_collect_keeps_direct_itemspaces_separate(model, tmp_path, monkeypatch):
     e = export(model, tmp_path, monkeypatch)
     items = {i: e.P[i] for i in (1, 7)}
     expected = loop(e.P, 1)
@@ -94,8 +94,57 @@ def test_existing_itemspaces_are_used_and_kept(model, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cls, '_mx_collect_item', item)
     assert_same(e.P.collect(), expected)
-    assert calls == [False, True, False, True]
+    assert calls == [False, False, False, False]
     assert set(e.P._mx_itemspaces) == {(1, 1), (7, 1)}
+    assert all(e.P[i] is item for i, item in items.items())
+
+
+@pytest.mark.parametrize('use_slots', [True, False])
+def test_export_preserves_authored_inputs_in_both_routes(model, tmp_path, monkeypatch, use_slots):
+    P = model.P
+    P.ids[()] = (3, 1)
+    P.C.formula = lambda j: None
+    P.C.y.formula = lambda: 10 * i + j
+    P.C.new_cells('outside', lambda: i + j)
+    P[3].C[10].y[()] = 100
+    P[3].C[10].outside[()] = 900
+    P.collect_outputs.formula = lambda: {'sum': {'y': C[10].y()}}
+
+    e = export(model, tmp_path, monkeypatch, use_slots=use_slots)
+    item = e.P[3]
+    nested = item.C[10]
+    assert e.P.ids() == (3, 1)
+    assert nested.y() == 100
+    assert nested.outside() == 900
+    assert e.P.collect().sum.y == P.collect().sum.y == 120
+    assert e.P[3] is item
+    assert item.C[10] is nested
+    assert list(e.P._mx_itemspaces.values()) == [item]
+
+
+def test_exported_collect_releases_an_item_when_outputs_raise(model, tmp_path, monkeypatch):
+    model.P.collect_outputs.formula = lambda: {'sum': {'x': 1 / (i - 3)}}
+    e = export(model, tmp_path, monkeypatch)
+    direct = e.P[3]
+    expected = direct.pv()
+    roots = []
+    cls = type(e.P)
+    original = cls._mx_collect_item
+
+    def item(self, i, scen=1):
+        root = original(self, i, scen)
+        roots.append(root)
+        return root
+
+    monkeypatch.setattr(cls, '_mx_collect_item', item)
+    with pytest.raises(ZeroDivisionError):
+        e.P.collect()
+    assert len(roots) == 1
+    assert roots[0]._parent is None
+    assert roots[0]._space is None
+    assert not e.P._mx_collect_cache
+    assert e.P[3] is direct
+    assert direct.pv() == expected
 
 
 def test_reference_domain_and_a_member_named_collect(tmp_path, monkeypatch):

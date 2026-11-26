@@ -37,14 +37,15 @@ Enhancements
   The domain is a zero-argument Cells or a Reference of the Space, and
   ``collect_outputs`` is a Cells that returns an ``'individual'``
   section, a ``'sum'`` section or both. ``collect()`` takes the other
-  parameters of the Space formula. It uses an ItemSpace that already
-  exists and keeps it; it deletes each ItemSpace it creates before it
-  creates the next, so a model with many items holds one at a time. The
+  parameters of the Space formula. It evaluates each coordinate in a
+  temporary ItemSpace and releases it before the next. Direct access
+  and ``collect()`` share explicitly assigned inputs and keep separate
+  calculated values. An export with Collect snapshots those inputs. The
   values equal those of the same loop written by hand, bit for bit: a
   sum is ``total = total + value`` in domain order (not the compensated
   :func:`sum` of Python 3.12 and later). The result is cached and is
-  cleared by the edits that clear the ItemSpaces, by a change of the
-  domain and by a change of the Space formula. :func:`~modelx.write_model`
+  cleared by changes to its inputs, domain, external dependencies, or
+  Space and Cells formulas. :func:`~modelx.write_model`
   saves the declaration in a ``_collect.json`` file in the directory of
   the Space, and :func:`~modelx.read_model` reads it back. An exported
   model has ``collect()`` too, and a compiler can take over its
