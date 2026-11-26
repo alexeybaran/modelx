@@ -1200,6 +1200,7 @@ class ModelImpl(*_model_impl_base):
         "currentspace",
         "path",
         "valreg",
+        "collect_spaces",   # UserSpaceImpls that declare collect
         "spmgr"      # shadows Impl.spmgr property; the SpaceManager home
     ) + get_mixin_slots(*_model_impl_base)
 
@@ -1229,6 +1230,7 @@ class ModelImpl(*_model_impl_base):
         self._namespace = CustomChainMap(self.named_spaces, self._global_refs)
         self.namespace = ModelNamespace(self)
         self.allow_none = False
+        self.collect_spaces = set()
         self.valreg = ValueRegistry(self, system.iomanager)
 
     def rename(self, name):
