@@ -134,6 +134,9 @@ from . import serializer_7
 
 
 IOSPECS_FILE = "_data/iospecs.py"
+# The collect declaration of a Space, next to its __init__.py. A reader
+# that predates it ignores the file.
+COLLECT_FILE = "_collect.json"
 
 IOSPECS_HEADER = """\
 # modelx: iospecs
@@ -329,6 +332,8 @@ class ModelWriter(serializer_7.ModelWriter):
         """
         for spec in self.model.iospecs:
             _spec_entry(0, spec)
+        for space in self.model._impl.collect_spaces:
+            space.collect_runner.check()
 
     def write_model(self):
 
@@ -402,6 +407,16 @@ class ModelWriter(serializer_7.ModelWriter):
             self._write_recursive(e)
 
         encoder.instruct().execute()
+
+        if isinstance(encoder, SpaceEncoder):
+            runner = encoder.space._impl.collect_runner
+            if runner is not None:
+                ziputil.write_str_utf8(
+                    json.dumps({"parameter": runner.parameter,
+                                "domain": runner.domain}),
+                    encoder.srcpath.parent / COLLECT_FILE,
+                    compression=self.compression,
+                    compresslevel=self.compresslevel)
 
     def write_pickledata(self):
         if self.model.iospecs:
@@ -525,6 +540,26 @@ class DecoderSelector(serializer_6.BaseSelector):
 class ModelReader(serializer_7.ModelReader):
 
     version = ModelWriter.version
+
+    def _read_model_inner(self):
+        model = super()._read_model_inner()
+        self._read_collect(model, self.path)
+        return model
+
+    def _read_collect(self, parent, path_):
+        for space in parent.spaces.values():
+            file = path_ / space.name / COLLECT_FILE
+            if ziputil.exists(file):
+                declaration = ziputil.read_file_utf8(json.load, file, "t")
+                try:
+                    space.set_collect(
+                        over={declaration["parameter"]: declaration["domain"]})
+                    space._impl.collect_runner.check()
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "invalid collect declaration in %s: %s" % (file, exc)
+                    ) from exc
+            self._read_collect(space, path_ / space.name)
 
     def parse_source(self, path_, obj):
 
