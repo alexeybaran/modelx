@@ -29,7 +29,7 @@ looked up through the module object at runtime.
 from modelx.core.base import (
     get_interface_list,
     get_mixin_slots,
-    Interface,
+    Impl, Interface,
 )
 from modelx.core.chainmap import CustomChainMap
 from modelx.core.reference import ReferenceImpl
@@ -64,7 +64,8 @@ class DynamicSpaceImpl(BaseSpaceImpl):
         "_dynbase",
         "_allargs",
         "rootspace",
-        "_dynbase_refs"
+        "_dynbase_refs",
+        "_collect_frame",
     ) + get_mixin_slots(BaseSpaceImpl)
 
     def __init__(
@@ -75,10 +76,15 @@ class DynamicSpaceImpl(BaseSpaceImpl):
         base,
         refs=None,
         arguments=None,
-        cache=None
+        cache=None,
+        frame=None,
+        direct=None,
     ):
         self._dynbase = base
-        base._dynamic_subs.append(self)
+        if frame is None:
+            base._dynamic_subs.append(self)
+        else:
+            self._collect_frame = frame
         self._init_root(parent)
         if cache:
             cache._impl = self
@@ -92,6 +98,8 @@ class DynamicSpaceImpl(BaseSpaceImpl):
             base.doc
         )
 
+        if frame is not None:
+            frame.spaces[self] = direct
         container[name] = self
 
         if refs is not None:
@@ -195,6 +203,21 @@ class DynamicSpaceImpl(BaseSpaceImpl):
         self._dynbase._dynamic_subs.remove(self)
         super().on_delete()
 
+    def _release_collect_space(self):
+        for cells in self.cells.values():
+            cells.data.clear()
+            cells.on_delete()
+        self.cells.clear()
+        self.observers.clear()
+        self.named_spaces.clear()
+        self.param_spaces.clear()
+        self._named_itemspaces.clear()
+        self.own_refs.clear()
+        self._dynbase_refs.clear()
+        if hasattr(self, '_ns_dict'):
+            self._ns_dict.clear()
+        Impl.on_delete(self)
+
     @property
     def arguments(self):
         return self._arguments
@@ -240,19 +263,25 @@ class ItemSpaceImpl(DynamicSpaceImpl):
         name,
         refs,
         arguments,
-        cache
+        cache,
+        frame=None,
+        direct=None,
     ):
-        if name is None:
+        if frame is not None and not parent.is_dynamic():
+            name = '__Collect'
+            container = {}
+        elif name is None:
             name = parent.itemspacenamer.get_next(base.named_itemspaces)
+            container = parent._named_itemspaces
         elif (is_valid_name(name)
               and name not in parent.namespace
               and name not in parent.named_itemspaces):
-            pass
+            container = parent._named_itemspaces
         else:
             raise ValueError("invalid name")
 
         DynamicSpaceImpl.__init__(
-            self, parent, name, parent._named_itemspaces, base, refs, arguments, cache
+            self, parent, name, container, base, refs, arguments, cache, frame, direct
         )
         self._bind_args(self.arguments)
         self._init_child_spaces(self)
@@ -263,12 +292,16 @@ class ItemSpaceImpl(DynamicSpaceImpl):
         self.rootspace = self
 
     def _init_child_spaces(self, space):
+        frame = getattr(space, '_collect_frame', None)
+        direct = frame.spaces[space] if frame is not None else None
         for name, base in space._dynbase.named_spaces.items():
             dkey = space.dynamic_key + (name,)
             cache = self.dynamic_cache.get(dkey, None)
-            child = DynamicSpaceImpl(space, name, space.named_spaces, base, cache=cache)
+            child = DynamicSpaceImpl(
+                space, name, space.named_spaces, base, cache=cache, frame=frame,
+                direct=direct.named_spaces.get(name) if direct is not None else None)
             self._init_child_spaces(child)
-            self.parent.dynamic_cache[dkey] = child.interface
+            self.dynamic_cache[dkey] = child.interface
 
     # ----------------------------------------------------------------------
     # Selective invalidation closure (CoreRefactorDesign §5.8, Phase 7)

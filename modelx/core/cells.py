@@ -1039,12 +1039,29 @@ class CellsImpl(*_cells_impl_base):
             else:
                 raise KeyError("Assignment in cells other than %s" % key)
         else:
+            runner = None
+            if (key not in self.input_keys and self.parent.is_dynamic()
+                    and self.model.collect_spaces):
+                # A new input can replace a value calculated in a private
+                # Collect item. There is no Direct node for that calculation.
+                parent = self.parent
+                while parent.is_dynamic():
+                    parent = parent.parent
+                if parent in self.model.collect_spaces:
+                    runner = parent.collect_runner
             if self.system._recalc_dependents:
-                targets = self.model.tracegraph.get_startnodes_from(node)
+                graph = self.model.tracegraph
+                targets = graph.get_startnodes_from(node)
+                if runner is not None:
+                    for args in runner.data:
+                        collect_node = key_to_node(runner, args)
+                        targets.extend(graph.get_startnodes_from(collect_node) or [collect_node])
             self.clear_value_at(key)
             self._store_value(key, value)
             self.model.tracegraph.add_node(node)
             self.input_keys.add(key)
+            if runner is not None:
+                runner.clear()
             if self.system._recalc_dependents:
                 for trg in targets:
                     trg[OBJ].get_value_from_key(trg[KEY])

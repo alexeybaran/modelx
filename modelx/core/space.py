@@ -1831,7 +1831,9 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
         self._named_itemspaces = {}
         self.itemspacenamer = AutoNamer("__Space")
 
-        if self.is_dynamic():
+        if getattr(self, '_collect_frame', None) is not None:
+            self.dynamic_cache = self._collect_frame.dynamic_cache
+        elif self.is_dynamic():
             self.dynamic_cache = self.parent.dynamic_cache
         else:
             # Cache interfaces for reuse after deletion
@@ -1910,7 +1912,7 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
         node = get_node(self, args, kwargs)
         return self.system.executor.eval_node(node)
 
-    def on_eval_formula(self, key):
+    def _resolve_itemspace_params(self, key):
         params = self.altfunc(*key)
 
         if params is None:
@@ -1957,7 +1959,12 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
         else:
             raise ValueError("Space formula must return either dict or None")
 
+        return base, refs
+
+    def on_eval_formula(self, key):
+        base, refs = self._resolve_itemspace_params(key)
         dkey = (self.dynamic_key if self.is_dynamic() else ()) + (key,)
+        frame = getattr(self, '_collect_frame', None)
 
         space = ItemSpaceImpl(
             parent=self,
@@ -1965,7 +1972,9 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
             name=None,
             refs=refs,
             arguments=node_get_args(key_to_node(self, key)),
-            cache=self.dynamic_cache.get(dkey, None)
+            cache=self.dynamic_cache.get(dkey, None),
+            frame=frame,
+            direct=frame.direct_item(self, key) if frame is not None else None,
         )
 
         self.param_spaces[key] = space
@@ -2114,7 +2123,8 @@ class BaseSpaceImpl(*_base_space_impl_base):
     def __getstate__(self):
         d = {attr: getattr(self, attr)
                 for c in type(self).mro()[:-1]
-                for attr in c.__slots__ if attr != "dynamic_cache"}   # exclude object type
+                for attr in c.__slots__
+                if attr not in ('dynamic_cache', '_collect_frame')}
         return d
 
     def __setstate__(self, state):

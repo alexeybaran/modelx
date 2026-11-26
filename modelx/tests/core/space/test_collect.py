@@ -117,11 +117,16 @@ def test_result_pickles_and_copies(model, copier):
     assert c.sum.arr.tobytes() == r.sum.arr.tobytes()
 
 
-def test_existing_itemspaces_are_used_not_recomputed(model, monkeypatch):
+def test_existing_itemspaces_keep_their_own_cache(model, monkeypatch):
     P = model.P
+    P.seen = seen = []
+    P.pv.formula = lambda: seen.append(i) or sum(cf(t) / (1 + rate) ** t for t in range(T))
+    P.new_cells('outside', lambda: i * 10)
     items = [P[i] for i in P.ids()]
     for item in items:
         item.pv()
+        item.outside()
+    seen.clear()
     calls = []
     original = TraceGraph.__iter__
 
@@ -134,17 +139,39 @@ def test_existing_itemspaces_are_used_not_recomputed(model, monkeypatch):
     r = P.collect()
     assert not calls
     assert [r.individual[i].pv for i in P.ids()] == pv_values
+    assert seen == list(P.ids())
     assert [P[i] for i in P.ids()] == items
+    assert all(len(item.collect_outputs) == 0 for item in items)
+    assert [item.outside() for item in items] == [i * 10 for i in P.ids()]
 
 
-def test_collect_holds_one_created_itemspace_at_a_time(model):
+def test_collect_never_publishes_private_itemspaces(model):
     P = model.P
     P.seen = seen = []
     P.collect_outputs.formula = lambda: (
         seen.append(len(_space.parent._impl.param_spaces)) or {'sum': {'pv': pv()}})
     P.collect()
-    assert seen == [1] * 7
+    assert seen == [0] * 7
     assert not P.itemspaces
+
+
+def test_collect_follows_new_updated_and_removed_nested_inputs(model):
+    P = model.P
+    Child = P.new_space('Child', formula=lambda j: None)
+    Child.new_cells('amount', lambda t: i + j + t)
+    P.collect_outputs.formula = lambda: {'sum': {'amount': Child[10].amount(1)}}
+    nested = P[1].Child[10]
+    assert nested.amount(1) == 12
+    assert P.collect().sum.amount == 105
+
+    nested.amount[1] = 100
+    assert P.collect().sum.amount == 193
+    nested.amount[1] = 200
+    assert P.collect().sum.amount == 293
+    nested.amount.clear_at(1)
+    assert P.collect().sum.amount == 105
+    assert nested is P[1].Child[10]
+    assert not len(nested.amount)
 
 
 @pytest.mark.parametrize("edit", [

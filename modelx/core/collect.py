@@ -19,14 +19,11 @@ zero-argument Cells or a Reference of the Space, by name) and the
 ``collect_outputs`` Cells, a zero-argument formula that returns the
 ``individual`` and ``sum`` outputs of one ItemSpace.
 
-``Space.collect(*args)`` is a cached node of the trace graph. For each
-coordinate it takes the ItemSpace as ``space[...]`` does, reads its
-``collect_outputs`` and detaches the values. An ItemSpace that already
-existed is kept as it is. An ItemSpace that collect created is deleted
-before the next one is created; the node first takes over the
-dependencies of the deleted ItemSpace on everything outside it, and
-:class:`~modelx.core.itemspaces.ItemSpaceManager` clears the node for
-the edits that would have cleared that ItemSpace.
+``Space.collect(*args)`` is a cached node of the trace graph. Each
+coordinate is evaluated in a private ItemSpace that shares authored
+inputs with direct access. External dependencies are recorded on the
+collect node. :class:`~modelx.core.itemspaces.ItemSpaceManager` also
+invalidates the node when the item's templates change.
 """
 
 from collections import OrderedDict
@@ -34,11 +31,11 @@ from inspect import BoundArguments, Parameter, Signature
 
 from modelx.core.base import Interface, Impl
 from modelx.core.binding.namespace import BaseNamespace
-from modelx.core.cells import Cells
-from modelx.core.execution.trace import get_node, KEY
+from modelx.core.cells import Cells, CellsImpl
+from modelx.core.execution.trace import get_node, key_to_node, node_get_args, KEY
 from modelx.core.formula import Formula
 from modelx.core.node import NodeFactory, NodeFactoryImpl
-from modelx.core.reference import ReferenceProxy
+from modelx.core.reference import ReferenceImpl, ReferenceProxy
 from modelx.export._mx_collect import Accumulator, normalize_domain, prepare_output
 
 OUTPUTS = 'collect_outputs'
@@ -121,13 +118,55 @@ class CollectNode(NodeFactory):
         return self._baseattrs
 
 
-def _tree(space):
-    """``space`` and the Spaces and ItemSpaces in it."""
-    yield space
-    for child in space.named_spaces.values():
-        yield from _tree(child)
-    for item in getattr(space, 'param_spaces', {}).values():
-        yield from _tree(item)
+class _CollectFrame:
+    """Private item tree and the external dependencies it observes."""
+
+    def __init__(self, caller, nodes, refs):
+        self.caller = caller
+        self.nodes = nodes
+        self.refs = refs
+        self.dynamic_cache = {}
+        self.spaces = {}    # private Space -> matching Direct Space, if any
+        self._visited = set()
+
+    def owns(self, obj):
+        return obj in self.spaces or getattr(obj, 'parent', None) in self.spaces
+
+    def direct_item(self, parent, key):
+        direct = self.spaces.get(parent)
+        return direct.param_spaces.get(key) if direct is not None else None
+
+    def input_source(self, obj, key):
+        if isinstance(obj, CellsImpl):
+            direct = self.spaces[obj.parent]
+            source = direct.cells.get(obj.name) if direct is not None else None
+            if source is not None and key in source.input_keys:
+                return source
+
+    def record_formula_refs(self, obj):
+        # A bare global in a modelx formula doesn't pass through add_reference.
+        if obj not in self._visited and hasattr(obj, '_get_referents'):
+            self._visited.add(obj)
+            for ref in obj._get_referents()['refs'].values():
+                if isinstance(ref, ReferenceImpl) and not self.owns(ref):
+                    self.refs.add(ref)
+
+    def new_item(self, space, key):
+        from modelx.core.dynamic import ItemSpaceImpl
+
+        self.record_formula_refs(space)
+        base, refs = space._resolve_itemspace_params(key)
+        return ItemSpaceImpl(
+            parent=space, base=base, name=None, refs=refs,
+            arguments=node_get_args(key_to_node(space, key)), cache=None,
+            frame=self, direct=space.param_spaces.get(key))
+
+    def release(self):
+        for space in reversed(self.spaces):
+            space._release_collect_space()
+        self.spaces.clear()
+        self.dynamic_cache.clear()
+        self._visited.clear()
 
 
 class CollectRunner(NodeFactoryImpl):
@@ -219,6 +258,7 @@ class CollectRunner(NodeFactoryImpl):
 
     def on_clear_trace(self, key):
         self.data.pop(key, None)
+        self.model.refgraph.remove_with_referred((self, key))
         if not self.data:
             self.bases.clear()
 
@@ -234,62 +274,32 @@ class CollectRunner(NodeFactoryImpl):
     def on_eval_formula(self, key):
         space = self.space
         caller = (self, key)
+        executor = space.system.executor
         signature = space.formula.signature
         values = dict(zip(self.formula.parameters, key))
         accumulator = Accumulator()
+        nodes, refs, bases = set(), set(), set()
         for coordinate in normalize_domain(self.domain_value()):
             values[self.parameter] = coordinate
             bound = BoundArguments(
                 signature, OrderedDict((name, values[name]) for name in signature.parameters))
-            node = get_node(space, bound.args, bound.kwargs)
-            created = not space.has_node(node[KEY])
-            item = space.system.executor.eval_node(node)
-            done = False
+            item_key = get_node(space, bound.args, bound.kwargs)[KEY]
+            frame = _CollectFrame(caller, nodes, refs)
+            previous_frame = executor.collect_frame
+            executor.collect_frame = frame
             try:
-                outputs = item.cells[OUTPUTS].interface()
-                accumulator.add(coordinate, prepare_output(outputs, _LIVE_TYPES))
-                done = True
+                item = frame.new_item(space, item_key)
+                outputs = prepare_output(item.cells[OUTPUTS].interface(), _LIVE_TYPES)
+                accumulator.add(coordinate, outputs)
+                bases.update(sp._dynbase.idstr for sp in frame.spaces)
             finally:
-                if created:
-                    self._release(item, node, caller, keep_dependencies=done)
+                executor.collect_frame = previous_frame
+                frame.release()
         result = accumulator.result()
+        for node in nodes - {caller}:
+            self.model.tracegraph.add_edge(node, caller)
+        for ref in refs:
+            self.model.refgraph.add_edge(ref, caller)
+        self.bases.update(bases)
         self.data[key] = result
         return result
-
-    def _release(self, item, item_node, caller, keep_dependencies):
-        """Delete an ItemSpace that collect created, keeping its dependencies."""
-        graph, refgraph = self.model.tracegraph, self.model.refgraph
-        spaces = list(_tree(item))
-        inside = set(spaces)
-        nodes = {item_node}
-        for space in spaces:
-            for cells in space.cells.values():
-                nodes.update((cells, k) for k in cells.data)
-            nodes.update((space, k) for k in getattr(space, 'param_spaces', ()))
-
-        outer_nodes, outer_refs = set(), set()
-        for node in nodes:
-            if node in graph:
-                if keep_dependencies:
-                    outer_nodes.update(
-                        p for p in graph.predecessors(node) if p not in nodes)
-                if graph.has_edge(node, caller):
-                    graph.remove_edge(node, caller)
-            if keep_dependencies and node in refgraph:
-                outer_refs.update(
-                    r for r in refgraph.predecessors(node)
-                    if getattr(r, 'parent', None) not in inside)
-        if caller in refgraph:
-            for obj in list(refgraph.predecessors(caller)):
-                if getattr(obj, 'parent', None) in inside:
-                    refgraph.remove_edge(obj, caller)
-
-        self.space.clear_itemspace_at(item_node[KEY])
-
-        if keep_dependencies:
-            outer_nodes.discard(caller)
-            for node in outer_nodes:
-                graph.add_edge(node, caller)
-            for ref in outer_refs:
-                refgraph.add_edge(ref, caller)
-            self.bases.update(space._dynbase.idstr for space in spaces)
