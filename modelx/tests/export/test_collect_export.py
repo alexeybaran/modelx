@@ -200,3 +200,31 @@ def test_hook_must_return_a_collect_result(model, tmp_path, monkeypatch):
     with pytest.raises(TypeError, match='CollectResult'):
         e.P.collect()
     assert not e.P._mx_collect_cache
+
+
+def test_a_repeated_read_of_the_same_domain_tuple_is_not_normalized(tmp_path, monkeypatch):
+    """A cached result is read again without normalizing the domain only when the arguments are
+    equal and the domain is the same tuple object; an equal but new tuple, or another domain, is
+    normalized and gives its own result."""
+    m = mx.new_model()
+    P = m.new_space('P', formula=lambda i, s=1: None, refs={'keys': (2, 4)})
+    P.set_collect(over={'i': 'keys'}, outputs=lambda: {'sum': {'v': i * s}})
+    e = export(m, tmp_path, monkeypatch)
+    collect_module = importlib.import_module(type(e).__module__.rsplit('.', 1)[0] + '._mx_collect')
+    calls = []
+    normalize = collect_module.normalize_domain
+    monkeypatch.setattr(collect_module, 'normalize_domain', lambda value: calls.append(value) or normalize(value))
+    r = e.P.collect()
+    assert r.sum.v == 6 and len(calls) == 1
+    assert e.P.collect() is r and e.P.collect(1) is r and len(calls) == 1     # the same tuple, equal args
+    assert e.P.collect(2).sum.v == 12 and len(calls) == 2                       # other args
+    e.P.keys = e.P.keys                                      # the same object again
+    assert e.P.collect() is r and len(calls) == 2
+    e.P.keys = tuple([2, 4])                                 # an equal, new tuple: normalized, same result
+    assert e.P.collect() is r and len(calls) == 3
+    assert e.P.collect() is r and len(calls) == 3
+    e.P.keys = (2, 4, 5)                                     # another domain
+    assert e.P.collect().sum.v == 11 and len(calls) == 4
+    e.P.keys = [2, 4]                                        # not a tuple: normalized at every read
+    assert e.P.collect() is r and e.P.collect() is r and len(calls) == 6
+    m.close()

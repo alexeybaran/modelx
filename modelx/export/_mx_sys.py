@@ -121,6 +121,9 @@ class BaseSpace(BaseParent):
 # over collect() by defining _mx_collect_hook and _mx_collect_hook_version.
 COLLECT_HOOK_VERSIONS = (1,)
 
+# The cache key, for the same arguments, of the domain tuple a result was last read with
+_SAME_DOMAIN = object()
+
 
 def collect_from_space(space, domain, item, args, cache):
     """Evaluate ``collect()`` of an exported Space.
@@ -128,13 +131,24 @@ def collect_from_space(space, domain, item, args, cache):
     ``domain`` is the value of the domain, ``item(c)`` the ItemSpace at
     coordinate ``c``, ``args`` the other Space parameters in signature
     order, and ``cache`` the Space's dict of results.
+
+    A result is read again without normalizing the domain when the arguments
+    are equal and the domain is the very tuple object it was last read with:
+    a tuple cannot change, so its coordinates are those of the result.
     """
     from ._mx_collect import Accumulator, CollectResult, normalize_domain, prepare_output
 
+    same = (_SAME_DOMAIN, args)
+    if type(domain) is tuple:
+        held = cache.get(same)
+        if held is not None and held[0] is domain:
+            return held[1]
     coords = normalize_domain(domain)
     key = (coords, args)
     result = cache.get(key)
     if result is not None:
+        if type(domain) is tuple:
+            cache[same] = (domain, result)
         return result
 
     cls = type(space)
@@ -161,7 +175,10 @@ def collect_from_space(space, domain, item, args, cache):
             del root     # a root collect created is released here
             accumulator.add(coordinate, outputs)
         result = accumulator.result()
-    return cache.setdefault(key, result)
+    result = cache.setdefault(key, result)
+    if type(domain) is tuple:
+        cache[same] = (domain, result)
+    return result
 
 
 class MiniBaseSharedIO:
