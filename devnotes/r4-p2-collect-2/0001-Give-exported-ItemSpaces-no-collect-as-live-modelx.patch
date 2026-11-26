@@ -1,0 +1,117 @@
+From 8219b21126496789321d5f1d47ac5ba3457a92cc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 03:08:52 +0000
+Subject: [PATCH] Give exported ItemSpaces no collect, as live modelx
+
+Live modelx defines collect only on the declaring Space: reading it on
+an ItemSpace raises AttributeError and hasattr is False. The exported
+Space class, which its ItemSpace roots share, had collect as a method
+that raised TypeError on a root. It is now a property that raises
+AttributeError on a root, so exported and compiled models behave as
+live; the TypeError check in collect_from_space is gone with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019ikg7LzyawH1Pt5X2iUgyW
+---
+ doc/source/reference/collect_hook.rst      |  4 ++--
+ modelx/export/_mx_sys.py                   |  2 --
+ modelx/export/exporter.py                  | 12 ++++++++++--
+ modelx/tests/export/test_collect_export.py | 19 +++++++++++++++++--
+ 4 files changed, 29 insertions(+), 8 deletions(-)
+
+diff --git a/doc/source/reference/collect_hook.rst b/doc/source/reference/collect_hook.rst
+index 6e4aeba..886c4fc 100644
+--- a/doc/source/reference/collect_hook.rst
++++ b/doc/source/reference/collect_hook.rst
+@@ -72,8 +72,8 @@ What modelx guarantees
+ * A ``CollectResult`` that the hook returns is stored in the cache and
+   returned as it is. :obj:`None` makes modelx evaluate the items itself,
+   and that result is stored. Nothing is stored when the hook raises.
+-* ``collect()`` called on an ItemSpace raises :obj:`TypeError` before
+-  any of this.
++* An ItemSpace has no ``collect``: reading it raises
++  :obj:`AttributeError`, as in live modelx.
+ 
+ When the hook is absent or unknown
+ ----------------------------------
+diff --git a/modelx/export/_mx_sys.py b/modelx/export/_mx_sys.py
+index 71e90cc..ea24f64 100644
+--- a/modelx/export/_mx_sys.py
++++ b/modelx/export/_mx_sys.py
+@@ -131,8 +131,6 @@ def collect_from_space(space, domain, item, args, cache):
+     """
+     from ._mx_collect import Accumulator, CollectResult, normalize_domain, prepare_output
+ 
+-    if space._mx_roots:
+-        raise TypeError("collect() is a method of the Space, not of its ItemSpaces")
+     coords = normalize_domain(domain)
+     key = (coords, args)
+     result = cache.get(key)
+diff --git a/modelx/export/exporter.py b/modelx/export/exporter.py
+index d60bb6f..83ac173 100644
+--- a/modelx/export/exporter.py
++++ b/modelx/export/exporter.py
+@@ -853,12 +853,20 @@ class SpaceTranslator(ParentTranslator):
+ 
+         return _mx_root
+ 
+-    def {method}(self{other_params}):
++    def _mx_collect_run(self{other_params}):
+         return _mx_sys.collect_from_space(
+             self, {domain},
+             lambda _mx_c: self._mx_collect_item({item_args}),
+             ({other_args}), self._mx_collect_cache)
+ 
++    @property
++    def {method}(self):
++        # Defined on the Space only, as in modelx: not on its ItemSpaces
++        if self._mx_roots:
++            raise AttributeError(
++                "Attribute '{method}' is not in an ItemSpace of " + self._name)
++        return self._mx_collect_run
++
+     """)
+ 
+     lock_assign = textwrap.dedent("""\
+@@ -1072,7 +1080,7 @@ class SpaceTranslator(ParentTranslator):
+                     method = '_mx_collect'   # a member named collect comes first
+                 itemspace_dict += '\nself._mx_collect_cache = {}'
+                 slot_names.append('_mx_collect_cache')
+-                class_names.update(['_mx_collect_item', method])
++                class_names.update(['_mx_collect_item', '_mx_collect_run', method])
+                 others = [p for p in space.formula.signature.parameters.values()
+                           if p.name != runner.parameter]
+                 other_args = ', '.join(p.name for p in others) + (
+diff --git a/modelx/tests/export/test_collect_export.py b/modelx/tests/export/test_collect_export.py
+index 5d827d7..78ff051 100644
+--- a/modelx/tests/export/test_collect_export.py
++++ b/modelx/tests/export/test_collect_export.py
+@@ -108,8 +108,23 @@ def test_reference_domain_and_a_member_named_collect(tmp_path, monkeypatch):
+     assert e.P.collect().sum.i == 6 == P.collect().sum.i
+     assert e.Q.collect == 1 == Q.collect
+     assert list(e.Q._mx_collect().individual) == [5] == list(Q._mx_collect().individual)
+-    with pytest.raises(TypeError):
+-        e.P[2].collect()
++    m.close()
++
++
++def test_itemspaces_have_no_collect_live_or_exported(tmp_path, monkeypatch):
++    m = mx.new_model()
++    P = m.new_space('P', formula=lambda i: None, refs={'keys': (2, 4)})
++    P.set_collect(over={'i': 'keys'}, outputs=lambda: {'sum': {'i': i}})
++    Q = m.new_space('Q', formula=lambda i: None, refs={'keys': (5,), 'collect': 1})
++    Q.set_collect(over={'i': 'keys'}, outputs=lambda: {'individual': {'i': i}})
++    e = export(m, tmp_path, monkeypatch)
++    for space, name in [(P, 'collect'), (e.P, 'collect'),
++                        (Q, '_mx_collect'), (e.Q, '_mx_collect')]:
++        assert hasattr(space, name)
++        item = space[space.keys[0]]
++        assert not hasattr(item, name)
++        with pytest.raises(AttributeError, match="Attribute '%s' is not in" % name):
++            getattr(item, name)
+     m.close()
+ 
+ 
+-- 
+2.43.0
+
