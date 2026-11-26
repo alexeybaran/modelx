@@ -16,6 +16,58 @@ Anaconda users should use the ``conda`` command instead::
 Enhancements
 ============
 
+* A parameterized Space can declare ``collect()``: the evaluation of the
+  Space at every coordinate of a domain, one ItemSpace after another,
+  keeping only the outputs. :meth:`UserSpace.set_collect
+  <modelx.core.space.UserSpace.set_collect>` declares it, and
+  :meth:`~modelx.core.model.Model.new_space` and
+  :meth:`UserSpace.new_space <modelx.core.space.UserSpace.new_space>`
+  take the same declaration as the new keyword arguments
+  ``collect_over`` and ``collect_outputs``::
+
+      >>> space = model.new_space('Projection', formula=lambda point_id: None)
+      >>> space.new_cells('point_ids', lambda: (1, 2, 3))
+      >>> space.new_cells('pv', lambda: point_id * 10.0)
+      >>> space.set_collect(over={'point_id': space.point_ids},
+      ...                   outputs=lambda: {'individual': {'pv': pv()},
+      ...                                    'sum': {'pv': pv()}})
+      >>> space.collect().sum.pv
+      60.0
+
+  The domain is a zero-argument Cells or a Reference of the Space, and
+  ``collect_outputs`` is a Cells that returns an ``'individual'``
+  section, a ``'sum'`` section or both. ``collect()`` takes the other
+  parameters of the Space formula. It uses an ItemSpace that already
+  exists and keeps it; it deletes each ItemSpace it creates before it
+  creates the next, so a model with many items holds one at a time. The
+  values equal those of the same loop written by hand, bit for bit: a
+  sum is ``total = total + value`` in domain order (not the compensated
+  :func:`sum` of Python 3.12 and later). The result is cached and is
+  cleared by the edits that clear the ItemSpaces, by a change of the
+  domain and by a change of the Space formula. :func:`~modelx.write_model`
+  saves the declaration in a ``_collect.json`` file in the directory of
+  the Space, and :func:`~modelx.read_model` reads it back. An exported
+  model has ``collect()`` too, and a compiler can take over its
+  evaluation through the hook described in :ref:`collect-hook`.
+
+  Limits: one parameter is collected over; the domain must be a
+  non-empty sequence of distinct, hashable values (an empty domain raises
+  :obj:`ValueError`, where a loop would give no total); a ``sum`` value
+  cannot be a str, a list or a tuple; the declaration is not inherited by
+  derived Spaces nor copied by :meth:`~modelx.core.space.UserSpace.copy`;
+  only the current serializer version saves it. When the Space formula
+  loses the parameter, or the domain or ``collect_outputs`` is deleted,
+  ``collect()``, :func:`~modelx.write_model` and
+  :func:`~modelx.export_model` raise an error until
+  :meth:`~modelx.core.space.UserSpace.set_collect` is called again;
+  ``set_collect(None)`` removes the declaration. A model without a
+  declaration is saved and exported exactly as before.
+
+  A model saved with a declaration opens in modelx 0.33 and in earlier
+  development versions of 0.34 without the declaration: they ignore the
+  ``_collect.json`` file, ``collect_outputs`` is an ordinary Cells, and
+  ``space.collect`` is not defined.
+
 * Tools can tell what a value is from the name of its class
   (:ref:`toolapi-kinds`). A tool first checks that
   ``type(v).__module__`` is a str that starts with ``"modelx."``,
@@ -85,6 +137,15 @@ Enhancements
 
 Backward Incompatible Changes
 ==============================
+
+* :class:`~modelx.core.space.UserSpace` has the new method
+  :meth:`~modelx.core.space.UserSpace.set_collect`, so in a script
+  ``space.set_collect`` is the method, also for a Space that has a member
+  named ``set_collect``. Reach such a member as
+  ``space.cells['set_collect']``, ``space.spaces['set_collect']`` or
+  ``space.refs['set_collect']``; formulas reach it by its name as before.
+  ``space.collect`` is defined only on a Space that declares
+  ``collect()``, and a member named ``collect`` comes first.
 
 * A Cells of an ItemSpace or of a DynamicSpace is now a
   :class:`~modelx.core.cells.DynamicCells`, and the proxy of a

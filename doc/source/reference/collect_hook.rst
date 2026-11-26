@@ -72,8 +72,8 @@ What modelx guarantees
 * A ``CollectResult`` that the hook returns is stored in the cache and
   returned as it is. :obj:`None` makes modelx evaluate the items itself,
   and that result is stored. Nothing is stored when the hook raises.
-* ``collect()`` called on an ItemSpace raises :obj:`TypeError` before
-  any of this.
+* An ItemSpace has no ``collect``: reading it raises
+  :obj:`AttributeError`, as in live modelx.
 
 When the hook is absent or unknown
 ----------------------------------
