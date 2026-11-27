@@ -1,0 +1,45 @@
+name: Verify standalone Collect
+
+on:
+  push:
+    branches: [verify/standalone-collect-2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            python: '3.14t'
+            gil: '0'
+          - runner: windows-latest
+            python: '3.14t'
+            gil: '0'
+          - runner: ubuntu-latest
+            python: '3.14'
+            gil: '1'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      PYTHON_GIL: ${{ matrix.gil }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install networkx==3.5 asttokens libcst numpy pandas openpyxl pytest scipy
+      - name: Verify interpreter mode
+        run: python -c "import os, sys, libcst, numpy, pandas, scipy; assert sys._is_gil_enabled() is (os.environ['PYTHON_GIL'] == '1')"
+      - name: Test Collect and export locks
+        run: >-
+          python -m pytest -q -ra
+          modelx/tests/core/space/test_collect.py
+          modelx/tests/export/test_collect_export.py
+          modelx/tests/export/test_locked_spaces.py
+          modelx/tests/serialize/test_collect_serialize.py
