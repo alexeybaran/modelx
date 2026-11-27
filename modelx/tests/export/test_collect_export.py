@@ -271,6 +271,19 @@ def test_a_model_without_collect_has_no_collect_runtime(tmp_path, monkeypatch):
         m.close()
 
 
+def test_nested_collect_declaration_enables_exported_runtime(tmp_path, monkeypatch):
+    model = mx.new_model()
+    try:
+        parent = model.new_space('Parent')
+        child = parent.new_space('Child', formula='lambda i: None', refs={'ids': (2, 4)})
+        child.set_collect(over={'i': 'ids'}, outputs='lambda: {"sum": {"value": i}}')
+        exported = export(model, tmp_path, monkeypatch)
+        assert exported.Parent.Child.collect().sum.value == 6
+        assert not exported.Parent.Child._mx_itemspaces
+    finally:
+        model.close()
+
+
 # The collect hook (doc/source/reference/collect_hook.rst)
 
 def install_hook(monkeypatch, space, hook, version=1):

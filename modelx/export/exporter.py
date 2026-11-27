@@ -327,12 +327,12 @@ class Exporter:
 
     def _write_collect_runtime(self):
         """Insert the Collect extension at its original positions in _mx_sys.py."""
+        from ._mx_collect_runtime import COLLECT_HELPERS, COLLECT_IMPORTS
+
         base = read_file(lambda stream: stream.read(), this_dir / '_mx_sys.py', 'b')
-        extension = read_file(lambda stream: stream.read(), this_dir / '_mx_collect_runtime.py', 'b').splitlines()
-        separator = extension.index(b'')
         newline = b'\r\n' if b'\r\n' in base else b'\n'
-        imports = newline.join(extension[:separator]) + newline
-        helpers = newline.join(extension[separator + 1:]) + 3 * newline
+        imports = COLLECT_IMPORTS.replace(b'\n', newline)
+        helpers = COLLECT_HELPERS.replace(b'\n', newline)
 
         typing_import = b'from typing import Dict'
         io_class = b'class MiniBaseSharedIO:'

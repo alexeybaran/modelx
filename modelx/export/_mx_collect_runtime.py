@@ -1,6 +1,8 @@
-from types import BuiltinMethodType, MethodType
+"""Source sections added to the standalone runtime for Collect exports."""
 
-# The versions of the collect hook this runtime calls. See the page
+COLLECT_IMPORTS = b'from types import BuiltinMethodType, MethodType\n'
+
+COLLECT_HELPERS = br'''# The versions of the collect hook this runtime calls. See the page
 # "collect hook" of the modelx reference: a compiled Space class takes
 # over collect() by defining _mx_collect_hook and _mx_collect_hook_version.
 COLLECT_HOOK_VERSIONS = (1,)
@@ -102,3 +104,6 @@ def collect_from_space(space, domain, item, args, cache):
     if type(domain) is tuple:
         cache[same] = (domain, result)
     return result
+
+
+'''
