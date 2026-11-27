@@ -45,7 +45,7 @@ class NonThreadedExecutor:
                         owner.nodes.add((source, key))
                         return source.data[key]
                 return self._eval_formula(node)
-            if obj.is_cached and any(frame.owns_argument(arg) for arg in key):
+            if obj.is_cached and key and frame.owns_cache_key(key):
                 raise RuntimeError(
                     'A cached external formula cannot take a temporary Collect ItemSpace argument')
 

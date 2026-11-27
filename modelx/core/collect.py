@@ -141,11 +141,22 @@ class _CollectFrame:
                 return frame
             frame = frame.enclosing
 
-    def owns_argument(self, value):
-        if isinstance(value, (Interface, BaseNamespace)):
-            return self.owner_of(value._impl) is not None
-        if isinstance(value, MethodType) and isinstance(value.__self__, CellsImpl):
-            return self.owner_of(value.__self__) is not None
+    def owns_cache_key(self, key):
+        pending = list(key)
+        seen = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, (Interface, BaseNamespace)):
+                if self.owner_of(value._impl) is not None:
+                    return True
+            elif isinstance(value, MethodType) and isinstance(value.__self__, CellsImpl):
+                if self.owner_of(value.__self__) is not None:
+                    return True
+            elif type(value) is tuple or type(value) is frozenset:
+                identity = id(value)
+                if identity not in seen:
+                    seen.add(identity)
+                    pending.extend(value)
         return False
 
     def direct_item(self, parent, key):

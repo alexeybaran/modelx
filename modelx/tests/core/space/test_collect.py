@@ -242,6 +242,27 @@ def test_cached_external_calls_cannot_store_private_item_keys(model):
     assert Q.read(P[1]) == P[1].cf(0)
 
 
+@pytest.mark.parametrize('use_frozenset', [False, True])
+def test_cached_external_calls_cannot_store_nested_private_item_keys(model, use_frozenset):
+    P = model.P
+    Q = model.new_space('Q')
+    P.Q = Q
+    P.new_cells('private_value', lambda: i)
+    Q.new_cells('read', lambda item: 2)
+    if use_frozenset:
+        P.collect_outputs.formula = lambda: {'sum': {'value': Q.read(frozenset(((_space,),)))}}
+    else:
+        P.collect_outputs.formula = lambda: {'sum': {'value': Q.read(((private_value,),))}}
+
+    with pytest.raises(FormulaError, match='cached external formula cannot take a temporary Collect ItemSpace'):
+        P.collect()
+    assert len(Q.read) == 0
+
+    P.collect_outputs.formula = lambda: {'sum': {'value': Q.read(frozenset((('shared',),)))}}
+    assert P.collect().sum.value == 14
+    assert len(Q.read) == 1
+
+
 @pytest.mark.parametrize("edit", [
     lambda P, m: setattr(P, 'rate', 0.05),
     lambda P, m: setattr(P, 'T', 3),
