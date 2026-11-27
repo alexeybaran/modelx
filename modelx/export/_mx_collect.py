@@ -260,12 +260,12 @@ def _collect_parallel(coords, evaluate, accumulator, workers):
     from concurrent.futures import ThreadPoolExecutor
     from itertools import islice
 
-    # Workers may finish in any order. Fold their outputs in domain
-    # order, with at most one outstanding item per worker.
+    # Fold outputs in domain order. A second wave gives workers more
+    # work while the caller waits for a slow item at the head.
     remaining = iter(coords)
     exhausted = object()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending = deque((c, pool.submit(evaluate, c)) for c in islice(remaining, workers))
+        pending = deque((c, pool.submit(evaluate, c)) for c in islice(remaining, 2 * workers))
         while pending:
             coordinate, task = pending.popleft()
             accumulator.add(coordinate, task.result())
