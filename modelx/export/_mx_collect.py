@@ -5,6 +5,7 @@ so it must not import modelx.
 """
 
 from copy import deepcopy
+from threading import Lock, RLock, local
 
 
 def normalize_domain(value):
@@ -217,3 +218,161 @@ class Accumulator:
         if 'sum' in self._modes:
             fields['sum'] = CollectResult(self._sum)
         return CollectResult(fields)
+
+
+# An in-flight call is never stored in the result cache. The same cache
+# may be read without taking this lock once a result is published.
+_PENDING = {}
+_PENDING_LOCK = Lock()
+_ACTIVE = local()
+_DEPENDENCIES = {}
+
+
+def _supports_parallel_key(key):
+    # The registry mutex must never invoke application __hash__ or __eq__.
+    values = [key]
+    while values:
+        value = values.pop()
+        kind = type(value)
+        if kind is tuple or kind is frozenset:
+            values.extend(value)
+        elif not (kind is int or kind is str or kind is float or kind is bytes
+                  or kind is bool or kind is complex or kind is type(None)):
+            return False
+    return True
+
+
+def _depends_on(flight, other):
+    pending = [flight]
+    seen = set()
+    while pending:
+        dependency = pending.pop()
+        if dependency is other:
+            return True
+        if dependency not in seen:
+            seen.add(dependency)
+            pending.extend(_DEPENDENCIES.get(dependency, ()))
+    return False
+
+
+def _collect_parallel(coords, evaluate, accumulator, workers):
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from itertools import islice
+
+    # Keep at most one submitted item per worker. Accumulate on this
+    # thread, including when addition calls Python code.
+    remaining = iter(coords)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {pool.submit(evaluate, c): c for c in islice(remaining, workers)}
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for task in done:
+                accumulator.add(pending.pop(task), task.result())
+            for c in islice(remaining, len(done)):
+                pending[pool.submit(evaluate, c)] = c
+
+
+def _collect_once(space, coords, item, cache, key, workers):
+    from concurrent.futures import Future
+
+    if not _supports_parallel_key(key):
+        return None
+
+    model_lock = getattr(space._model, '_mx_lock', None)
+    owns_lock = model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)()
+    caller = getattr(_ACTIVE, 'flight', None)
+    pending_key = (id(cache), key)
+    blocked = None
+    with _PENDING_LOCK:
+        flight = _PENDING.get(pending_key)
+        owner = flight is None
+        if owner:
+            flight = _PENDING[pending_key] = Future()
+        elif owns_lock:
+            blocked = 'A collect() call cannot wait for an active result while holding the model lock'
+        elif caller is not None and _depends_on(flight, caller):
+            blocked = 'Circular dependency between collect() calls'
+        if caller is not None and blocked is None:
+            targets = _DEPENDENCIES.setdefault(caller, {})
+            targets[flight] = targets.get(flight, 0) + 1
+
+    if blocked is not None:
+        result = cache.get(key)
+        if result is not None:
+            return result
+        raise RuntimeError(blocked)
+
+    try:
+        if not owner:
+            return flight.result()
+        _ACTIVE.flight = flight
+        parallel = caller is None and not owns_lock and len(coords) > 1
+        try:
+            # A result can be published between the initial cache miss and
+            # claiming the key. Look it up again without the registry mutex:
+            # the result cache can contain custom keys from the serial path.
+            result = cache.get(key)
+            if result is None:
+                result = cache.setdefault(
+                    key, _evaluate_collect(space, coords, item, workers, model_lock, parallel, flight))
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        flight.set_result(result)
+        return result
+    finally:
+        if owner:
+            _ACTIVE.flight = caller
+        with _PENDING_LOCK:
+            if owner:
+                del _PENDING[pending_key]
+            if caller is not None:
+                targets[flight] -= 1
+                if not targets[flight]:
+                    del targets[flight]
+                if not targets:
+                    del _DEPENDENCIES[caller]
+
+
+def _evaluate_collect(space, coords, item, workers, model_lock, parallel, flight):
+    from ._mx_sys import BaseMxObject, release_collect_item
+
+    guard_factory = model_lock is not None and (
+        getattr(space, '_mx_lock', None) is model_lock
+        or hasattr(type(space), '_mx_apply_formula'))
+
+    def outputs_at(coordinate):
+        if guard_factory:
+            with model_lock:
+                root = item(coordinate)
+        else:
+            root = item(coordinate)
+        try:
+            if parallel and model_lock is not None:
+                private_lock = None
+                # References can still point to public Spaces. Only members
+                # of the newly built tree get a different lock.
+                for child in root._mx_walk():
+                    if getattr(child, '_mx_lock', None) is model_lock:
+                        if private_lock is None:
+                            private_lock = RLock()
+                        child._mx_lock = private_lock
+            return prepare_output(root.collect_outputs(), (BaseMxObject,))
+        finally:
+            release_collect_item(root)
+            del root
+
+    def evaluate(coordinate):
+        _ACTIVE.flight = flight
+        try:
+            return outputs_at(coordinate)
+        finally:
+            _ACTIVE.flight = None
+
+    accumulator = Accumulator()
+    if parallel:
+        _collect_parallel(coords, evaluate, accumulator, min(workers, len(coords)))
+    else:
+        for coordinate in coords:
+            accumulator.add(coordinate, outputs_at(coordinate))
+    return accumulator.result()

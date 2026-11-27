@@ -204,6 +204,14 @@ def collect_from_space(space, domain, item, args, cache):
                 "_mx_collect_hook must return a CollectResult of _mx_collect "
                 "or None, not %s" % type(result).__name__)
 
+    if result is None and hook is None:
+        workers = getattr(space._model, '_mx_collect_workers', 1)
+        if type(workers) is not int or workers < 1:
+            raise ValueError('_mx_collect_workers must be a positive int, not %r' % (workers,))
+        if workers > 1 and not getattr(sys, '_is_gil_enabled', lambda: True)():
+            from ._mx_collect import _collect_once
+            result = _collect_once(space, coords, item, cache, key, workers)
+
     if result is None:
         accumulator = Accumulator()
         for coordinate in coords:

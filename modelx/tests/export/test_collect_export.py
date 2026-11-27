@@ -1,6 +1,9 @@
+import concurrent.futures as futures
 import gc
 import importlib
 import itertools
+import sys
+import threading
 import weakref
 
 import numpy as np
@@ -10,6 +13,11 @@ import modelx as mx
 from modelx.export import _mx_sys
 
 _counter = itertools.count()
+
+
+class TimedFuture(futures.Future):
+    def result(self, timeout=5):
+        return super().result(timeout)
 
 
 def export(model, tmp_path, monkeypatch, **kwargs):
@@ -247,6 +255,257 @@ def test_errors_propagate_and_are_not_cached(model, tmp_path, monkeypatch):
     assert not e.P._mx_collect_cache
 
 
+def test_parallel_export_overlaps_private_items_and_shares_locked_dependencies(
+        model, tmp_path, monkeypatch):
+    if getattr(sys, '_is_gil_enabled', lambda: True)():
+        pytest.skip('requires free-threaded Python with the GIL off')
+
+    P = model.P
+    P[3].cf[0] = 81.0
+    shared = model.new_space('Shared')
+    table = shared.new_space('Table', formula=lambda key: None, refs={'keys': (7, 9)})
+    table.new_cells('offset', lambda: 2 * key)
+    table.set_collect(over={'key': 'keys'}, outputs=lambda: {'sum': {'value': offset()}})
+    P.shared = shared
+    P.collect_outputs.formula = lambda: {
+        'individual': {'series': {0: cf(0)}, 'values': [i, 'policy']},
+        'sum': {'value': C.y() + shared.Table.collect().sum.value + shared.Table[7].offset()}}
+    serial = export(model, tmp_path, monkeypatch, locked_spaces=['P', 'Shared'])
+    expected = serial.P.collect()
+    e = export(model, tmp_path, monkeypatch, locked_spaces=['P', 'Shared'])
+    e._mx_collect_workers = 4
+    direct = e.P[3]
+    assert direct.cf(0) == 81.0
+
+    table_type = type(e.Shared.Table)
+    calls = []
+    original_offset = table_type._f_offset
+
+    def offset(item):
+        assert item._mx_lock is e._mx_lock and e._mx_lock._is_owned()
+        calls.append(item)
+        return original_offset(item)
+
+    monkeypatch.setattr(table_type, '_f_offset', offset)
+    original_outputs = type(e.P)._f_collect_outputs
+    barrier = threading.Barrier(4, timeout=5)
+    threads = set()
+    private_roots = []
+    guard = threading.Lock()
+
+    def outputs(item):
+        assert item._mx_lock is item.C._mx_lock
+        assert item._mx_lock is not e._mx_lock
+        assert item.shared._mx_lock is e._mx_lock
+        with guard:
+            threads.add(threading.get_ident())
+            private_roots.append(item)
+        barrier.wait()
+        return original_outputs(item)
+
+    monkeypatch.setattr(type(e.P), '_f_collect_outputs', outputs)
+    observed = e.P.collect()
+    assert e.P.collect() is observed
+    assert len(threads) == len(private_roots) == 4
+    assert all(root._parent is None and root._space is None for root in private_roots)
+    assert observed.sum.value == expected.sum.value
+    assert set(observed.individual) == set(expected.individual)
+    for i, value in observed.individual.items():
+        assert value.series(0) == value.series[0] == expected.individual[i].series[0]
+        assert value.values == expected.individual[i].values
+    assert e.P[3] is direct and direct.cf(0) == 81.0
+    assert direct._mx_lock is direct.C._mx_lock is e._mx_lock
+    assert list(e.P._mx_itemspaces.values()) == [direct]
+    assert sorted(item.key for item in calls) == [7, 7, 9]
+    assert list(e.Shared.Table._mx_itemspaces.values()) == [e.Shared.Table[7]]
+    assert not sys._is_gil_enabled()
+
+
+def test_parallel_export_collect_same_key_shares_in_flight_result(model, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+    e = export(model, tmp_path, monkeypatch)
+    e._mx_collect_workers = 4
+    entered = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    created = []
+    space_type = type(e.P)
+    make_item = space_type._mx_collect_item
+
+    def item(space, i, scen=1):
+        created.append(i)
+        entered.set()
+        assert release.wait(5)
+        return make_item(space, i, scen)
+
+    class ObservedFuture(TimedFuture):
+        def result(self, timeout=5):
+            waiting.set()
+            return super().result(timeout)
+
+    monkeypatch.setattr(space_type, '_mx_collect_item', item)
+    monkeypatch.setattr(futures, 'Future', ObservedFuture)
+    with futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(e.P.collect)
+        try:
+            assert entered.wait(5)
+            assert not e.P._mx_collect_cache
+            second = pool.submit(e.P.collect, scen=1)
+            assert waiting.wait(5)
+        finally:
+            release.set()
+        assert first.result(timeout=5) is second.result(timeout=5)
+    assert sorted(created) == [1, 2, 3, 7]
+
+
+@pytest.mark.parametrize(('workers', 'gil_enabled'), [(1, False), (4, True), (4, False)])
+def test_export_collect_error_allows_retry(workers, gil_enabled, model, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: gil_enabled, raising=False)
+    e = export(model, tmp_path, monkeypatch)
+    e._mx_collect_workers = workers
+    direct = e.P[3]
+    space_type = type(e.P)
+    make_item = space_type._mx_collect_item
+    original_outputs = space_type._f_collect_outputs
+    roots = []
+
+    def item(space, i, scen=1):
+        root = make_item(space, i, scen)
+        roots.append(root)
+        return root
+
+    def outputs(item):
+        if item.i == 3:
+            raise ValueError('bad output')
+        return original_outputs(item)
+
+    monkeypatch.setattr(space_type, '_mx_collect_item', item)
+    monkeypatch.setattr(space_type, '_f_collect_outputs', outputs)
+    with pytest.raises(ValueError, match='bad output'):
+        e.P.collect()
+    assert not e.P._mx_collect_cache
+    assert roots and all(root._parent is None and root._space is None for root in roots)
+    if workers == 1 or gil_enabled:
+        assert len(roots) == 1
+    assert e.P[3] is direct
+    monkeypatch.setattr(space_type, '_f_collect_outputs', original_outputs)
+    observed = e.P.collect()
+    expected = model.P.collect()
+    assert observed.sum.pv == pytest.approx(expected.sum.pv)
+    assert e.P.collect() is observed
+
+
+def test_parallel_export_collect_does_not_wait_with_the_model_lock(model, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+    shared = model.new_space('Shared')
+    shared.new_cells('value', lambda i: i)
+    model.P.shared = shared
+    model.P.collect_outputs.formula = lambda: {'sum': {'value': shared.value(i)}}
+    e = export(model, tmp_path, monkeypatch, locked_spaces=['Shared'])
+    e._mx_collect_workers = 4
+    entered = threading.Event()
+    ready_to_read = threading.Event()
+    reading = threading.Event()
+    original_outputs = type(e.P)._f_collect_outputs
+    original_value = type(e.Shared).value
+
+    def outputs(item):
+        if item.i == 3:
+            entered.set()
+            assert ready_to_read.wait(5)
+        return original_outputs(item)
+
+    def value(space, i):
+        if i == 3:
+            reading.set()
+        return original_value(space, i)
+
+    monkeypatch.setattr(futures, 'Future', TimedFuture)
+    monkeypatch.setattr(type(e.P), '_f_collect_outputs', outputs)
+    monkeypatch.setattr(type(e.Shared), 'value', value)
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(e.P.collect)
+        assert entered.wait(5)
+        with e._mx_lock:
+            ready_to_read.set()
+            assert reading.wait(5)
+            with pytest.raises(RuntimeError, match='holding the model lock'):
+                e.P.collect()
+        assert running.result(timeout=5).sum.value == 13
+
+
+def test_parallel_export_detects_a_cycle_between_running_collects(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+    monkeypatch.setattr(futures, 'Future', TimedFuture)
+    model = mx.new_model()
+    try:
+        A = model.new_space('A', formula=lambda i: None, refs={'keys': (1, 2)})
+        B = model.new_space('B', formula=lambda i: None, refs={'keys': (1, 2)})
+        A.other = B
+        B.other = A
+        for space in (A, B):
+            space.set_collect(over={'i': 'keys'}, outputs=lambda: {
+                'sum': {'value': other.collect().sum.value if i == 1 else i}})
+        e = export(model, tmp_path, monkeypatch)
+    finally:
+        model.close()
+    e._mx_collect_workers = 4
+    barrier = threading.Barrier(2, timeout=5)
+
+    def wait_for_other(outputs):
+        def wrapped(item):
+            if item.i == 1:
+                barrier.wait()
+            return outputs(item)
+        return wrapped
+
+    for space in (e.A, e.B):
+        cls = type(space)
+        monkeypatch.setattr(cls, '_f_collect_outputs', wait_for_other(cls._f_collect_outputs))
+    with futures.ThreadPoolExecutor(max_workers=2) as pool:
+        calls = (pool.submit(e.A.collect), pool.submit(e.B.collect))
+        for call in calls:
+            with pytest.raises(RuntimeError, match='Circular dependency'):
+                call.result(timeout=5)
+    assert not e.A._mx_collect_cache and not e.B._mx_collect_cache
+
+
+def test_custom_cache_key_can_reenter_collect_from_equality(model, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+    e = export(model, tmp_path, monkeypatch)
+    e._mx_collect_workers = 4
+    collect_module = importlib.import_module(type(e).__module__.rsplit('.', 1)[0] + '._mx_collect')
+    caller = threading.get_ident()
+    build_threads = set()
+    make_item = type(e.P)._mx_collect_item
+    reentries = []
+
+    def item(space, i, scen=1):
+        build_threads.add(threading.get_ident())
+        return make_item(space, i, scen)
+
+    class Scenario(int):
+        def __hash__(self):
+            return int.__hash__(self)
+
+        def __eq__(self, other):
+            if type(other) is int and other == 1:
+                assert collect_module._PENDING_LOCK.acquire(blocking=False)
+                collect_module._PENDING_LOCK.release()
+                reentries.append(e.P.collect(99))
+            return self is other
+
+    monkeypatch.setattr(type(e.P), '_mx_collect_item', item)
+    custom = Scenario(1)
+    serial = e.P.collect(custom)
+    assert build_threads == {caller}
+    pooled = e.P.collect(1)
+    assert pooled is not serial
+    assert pooled.sum.pv == pytest.approx(serial.sum.pv)
+    assert reentries and all(result is e.P.collect(99) for result in reentries)
+    assert e.P.collect(custom) is serial
+
+
 def test_a_stale_declaration_is_not_exported(model, tmp_path):
     model.P.formula = lambda j: None
     with pytest.raises(ValueError, match='stale'):
@@ -293,6 +552,14 @@ def test_hook_takes_over_collect(model, tmp_path, monkeypatch):
 
 def test_hook_can_decline(model, tmp_path, monkeypatch):
     e = export(model, tmp_path, monkeypatch)
+    e._mx_collect_workers = 4
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+    collect_module = importlib.import_module(type(e).__module__.rsplit('.', 1)[0] + '._mx_collect')
+
+    def unexpected_pool(*args):
+        pytest.fail('A compiled hook that declines should use the serial fallback')
+
+    monkeypatch.setattr(collect_module, '_collect_once', unexpected_pool)
     install_hook(monkeypatch, e.P, lambda space, coords, args: None)
     assert_same(e.P.collect(), loop(model.P, 1))
 

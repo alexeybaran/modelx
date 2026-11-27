@@ -5,12 +5,39 @@ The collect hook of exported models
 
 A Space that declares ``collect()``
 (:meth:`~modelx.core.space.UserSpace.set_collect`) is exported with a
-``collect()`` method. That method evaluates temporary ItemSpaces one at a
-time in Python. Direct access and Collect use the explicitly assigned Cells
-inputs captured at export. A compiler that builds an extension from the
-exported package can take over the evaluation, for example to run the items in parallel,
-through one hook described on this page. modelx itself never defines the
-hook. Live modelx has no hook: only exported models call it.
+``collect()`` method. Direct access and Collect use the explicitly assigned
+Cells inputs captured at export. A compiler that builds an extension from
+the exported package can take over the evaluation through the hook
+described on this page.
+
+Standalone Python exports
+-------------------------
+
+On free-threaded Python with the GIL off, set
+``mx_model._mx_collect_workers = 4`` on the loaded export to evaluate up
+to four private ItemSpaces at a time. The setting is a positive integer
+and defaults to one. Live modelx and standalone exports running with the
+GIL enabled evaluate the items serially.
+
+Use the same shared dependency rules as for caller-managed threads
+(:func:`~modelx.export_model`). The private items must be independent.
+List the Spaces they share in ``locked_spaces``. Shared references and
+public Direct items keep their export locks. Each private item is
+released after its outputs are copied. Parallel sums can vary in
+floating-point rounding because different items may finish first.
+
+Parallel evaluation supports coordinates and arguments made up of exact
+built-in immutable values such as integers, strings and tuples of those
+values. A key containing a custom object uses serial evaluation.
+
+Concurrent requests for the same standalone result share the computation
+for eligible keys when workers are enabled and the GIL is off. Nested
+evaluations and calls made while the caller holds the shared model lock
+run serially. A caller holding that lock gets a :obj:`RuntimeError` if
+the requested result is already in flight, because the workers may need
+the lock to finish. Circular dependencies between in-flight results also
+raise :obj:`RuntimeError`. These checks cover calls within one exported
+package.
 
 Version 1 is the only version.
 
@@ -78,11 +105,11 @@ What modelx guarantees
   it is a non-empty sequence of distinct, hashable coordinates. A domain
   that fails the check raises before the hook is called.
 * It calls the hook at most once per such call, on the thread that
-  called ``collect()``. modelx starts no threads. Calls from several
+  called ``collect()``. The hook controls worker use on this path. Calls from several
   threads at once can call the hook at once; the first result stored
   wins and is returned to every later call.
 * A ``CollectResult`` that the hook returns is stored in the cache and
-  returned as it is. :obj:`None` makes modelx evaluate the items itself,
+  returned as it is. :obj:`None` makes the export evaluate the items serially,
   and that result is stored. Nothing is stored when the hook raises.
 * An ItemSpace has no ``collect``: reading it raises
   :obj:`AttributeError`, as in live modelx.
