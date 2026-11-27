@@ -571,6 +571,7 @@ class ParentTranslator:
 
     def ref_copies(self, parent):
         result = []
+        relative = []
         for k in self.ref_names(parent):
             v = parent.refs[k]
 
@@ -582,7 +583,9 @@ class ParentTranslator:
                 proxy = parent._get_object(k, as_proxy=True)
                 refmode = proxy.refmode
                 if refmode == 'auto' or refmode == 'relative':
-                    if_clause = 'if ' + (base_k + '.__self__' if isinstance(v, Cells) else base_k) + '._mx_is_in(base_root) else ' + base_k
+                    is_cell = isinstance(v, Cells)
+                    relative.append((k, is_cell))
+                    if_clause = 'if ' + (base_k + '.__self__' if is_cell else base_k) + '._mx_is_in(base_root) else ' + base_k
                     result.append(self_k + ' = ' + self.ref_value(parent, v) + ' ' + if_clause)
                 elif refmode == 'absolute' or (
                         refmode is None and isinstance(proxy.parent, Model)):
@@ -599,7 +602,7 @@ class ParentTranslator:
         else:
             result.append('pass')
 
-        return "\n".join(result)
+        return "\n".join(result), tuple(relative)
 
     def ref_value(self, parent, value):
 
@@ -713,7 +716,7 @@ class SpaceTranslator(ParentTranslator):
     class_template = textwrap.dedent("""\
 
     _v_cells_names_{name} = [{cells_name_list}]
-    _v_space_params_{name} = [{space_param_list}]
+    _v_space_params_{name} = [{space_param_list}]{collect_ref_names}
 
 
     class _c_{name}(_mx_sys.BaseSpace):
@@ -1234,18 +1237,21 @@ class SpaceTranslator(ParentTranslator):
         input_tree = self.inputs.static_trees.get(input_space)
         if input_tree is not None:
             ref_assigns += ('\nself._mx_assign_input_tree(' + self.io_manager.get_code(input_tree) + ')')
+        ref_copies, relative_refs = self.ref_copies(space)
+        collect_ref_names = (f'\n_v_collect_refs_{space.name} = {relative_refs!r}'
+                             if relative_refs and space._impl.model.collect_spaces else '')
 
         return self.class_template.format(
             name=space.name,
             slots_decl=self.slots_decl(space, slot_names, class_names),
             cells_name_list=textwrap.indent(self.cells_name_list(space), ' ' * 4),
             space_param_list=textwrap.indent(self.space_param_list(space), ' ' * 4),
+            collect_ref_names=collect_ref_names,
             space_assigns=textwrap.indent(self.space_assigns(space), ' ' * 8),
             space_dict=textwrap.indent(self.space_dict(space), ' ' * 8),
             itemspace_dict=textwrap.indent(itemspace_dict, ' ' * 8),
             cache_vars=textwrap.indent("\n".join(cache_vars), ' ' * 8),
-            ref_copies=textwrap.indent(
-                self.ref_copies(space), ' ' * 8),
+            ref_copies=textwrap.indent(ref_copies, ' ' * 8),
             ref_assigns=textwrap.indent(ref_assigns, ' ' * 8),
             methods=textwrap.indent(self.formulas_with_inputs(trans, input_cells), ' ' * 4),
             cache_methods=textwrap.indent(''.join(cache_methods), ' ' * 4),

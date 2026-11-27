@@ -3,6 +3,7 @@ import collections
 import pickle
 from importlib import import_module
 import pathlib
+from types import BuiltinMethodType, MethodType
 from typing import Dict
 try:
     has_io = True
@@ -128,8 +129,14 @@ _SAME_DOMAIN = object()
 def release_collect_item(item):
     """Break the links that keep a private ItemSpace tree alive."""
     pending = [item]
+    owned = set()
+    candidates = []
     while pending:
         space: BaseSpace = pending.pop()
+        owned.add(id(space))
+        names = getattr(sys.modules[type(space).__module__], '_v_collect_refs_' + space._name, ())
+        if names:
+            candidates.append((space, names))
         pending.extend(space._mx_spaces.values())
         space._mx_spaces.clear()
         try:
@@ -143,6 +150,16 @@ def release_collect_item(item):
         space._mx_roots.clear()
         space._space = None
         space._parent = None
+
+    for space, names in candidates:
+        for name, is_cell in names:
+            value = getattr(space, name, None)
+            if is_cell:
+                if not isinstance(value, (MethodType, BuiltinMethodType)):
+                    continue
+                value = value.__self__
+            if id(value) in owned:
+                setattr(space, name, None)
 
 
 def collect_from_space(space, domain, item, args, cache):

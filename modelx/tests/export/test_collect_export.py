@@ -1,3 +1,4 @@
+import gc
 import importlib
 import itertools
 
@@ -147,6 +148,36 @@ def test_exported_collect_releases_an_item_when_outputs_raise(model, tmp_path, m
     assert not e.P._mx_collect_cache
     assert e.P[3] is direct
     assert direct.pv() == expected
+
+
+def test_exported_collect_releases_relative_space_and_cell_references(model, tmp_path, monkeypatch):
+    P = model.P
+    P.relref(root_alias=P)
+    P.C.relref(child_alias=P.C, cell_alias=P.C.y)
+    P.collect_outputs.formula = lambda: {
+        'sum': {'value': root_alias.C.child_alias.cell_alias()}}
+    e = export(model, tmp_path, monkeypatch)
+    direct = e.P[3]
+    child = direct.C
+    classes = (type(direct), type(child))
+
+    def live_items():
+        return sum(type(obj) in classes for obj in gc.get_objects())
+
+    gc.collect()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        before = live_items()
+        assert e.P.collect().sum.value == 130
+        assert live_items() == before
+    finally:
+        if was_enabled:
+            gc.enable()
+
+    assert e.P[3] is direct and direct.root_alias is direct
+    assert direct.C is child and child.child_alias is child
+    assert child.cell_alias.__self__ is child
 
 
 def test_reference_domain_and_a_member_named_collect(tmp_path, monkeypatch):
