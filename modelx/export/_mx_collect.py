@@ -45,52 +45,62 @@ class CollectResult:
     the domain. A named output that is a dict is a :class:`CollectedSeries`.
     """
 
-    __slots__ = ('_data', '_mx_native')
+    __slots__ = ('_fields',)
 
     def __init__(self, fields):
-        self._data = {
+        self._fields = {
             name: CollectedSeries(value) if type(value) is dict else value
             for name, value in fields.items()}
-        self._mx_native = None
-
-    @classmethod
-    def _from_native(cls, native):
-        result = cls.__new__(cls)
-        result._data = {}
-        result._mx_native = native
-        return result
-
-    @property
-    def _fields(self):
-        native = self._mx_native
-        if native is not None:
-            for name in native.fields:
-                getattr(self, name)
-        return self._data
 
     def __getattr__(self, name):
         # object.__getattribute__: a bare instance, as copy and pickle
         # create it, has no _fields yet and must not recurse here.
         try:
-            data = object.__getattribute__(self, '_data')
-            return data[name]
+            return object.__getattribute__(self, '_fields')[name]
         except KeyError:
-            native = object.__getattribute__(self, '_mx_native')
-            if native is None or name not in native.fields:
-                raise AttributeError(name) from None
-            value = native.materialize(name)
-            if type(value) is dict:
-                value = CollectedSeries(value)
-            return data.setdefault(name, value)
+            raise AttributeError(name) from None
 
     def __reduce__(self):
-        return type(self), (self._fields,)
+        fields = self._fields
+        return type(self), (dict(fields) if type(fields) is _NativeFields else fields,)
 
     def __dir__(self):
         return sorted(set(object.__dir__(self)) | set(self._fields))
 
     def __repr__(self):
         return 'CollectResult(%s)' % ', '.join(self._fields)
+
+
+class _NativeFields:
+    __slots__ = ('native', 'views', 'rows')
+
+    def __init__(self, native, individual):
+        self.native = native
+        self.views = {}
+        self.rows = {} if individual else None
+
+    def __getitem__(self, name):
+        views = self.views
+        if name in views:
+            return views[name]
+        if name not in self.native.fields:
+            raise KeyError(name)
+        value = self.native.materialize(name, self)
+        if type(value) is dict:
+            value = CollectedSeries(value)
+        return views.setdefault(name, value)
+
+    def __iter__(self):
+        return iter(self.native.fields)
+
+    def keys(self):
+        return self.native.fields
+
+
+def _native_result(native, individual=False):
+    result = CollectResult.__new__(CollectResult)
+    result._fields = _NativeFields(native, individual)
+    return result
 
 
 _SCALARS = (float, int, bool, complex, str, bytes, type(None))
