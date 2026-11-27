@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 import modelx as mx
-from modelx.export import _mx_sys
 
 _counter = itertools.count()
 
@@ -118,25 +117,40 @@ def test_exported_collect_keeps_direct_itemspaces_separate(model, tmp_path, monk
 
 
 @pytest.mark.parametrize('use_slots', [True, False])
-def test_export_preserves_authored_inputs_in_both_routes(model, tmp_path, monkeypatch, use_slots):
+@pytest.mark.parametrize('collect_first', [False, True])
+@pytest.mark.parametrize('workers', [1, 4])
+def test_export_preserves_authored_inputs_in_both_routes(
+        model, tmp_path, monkeypatch, use_slots, collect_first, workers):
     P = model.P
     P.ids[()] = (3, 1)
     P.C.formula = lambda j: None
     P.C.y.formula = lambda: 10 * i + j
     P.C.new_cells('outside', lambda: i + j)
-    P.collect_outputs.formula = lambda: {'sum': {'y': C[10].y()}}
+    P.collect_outputs.formula = lambda: {
+        'individual': {'y': C[10].y()}, 'sum': {'y': C[10].y()}}
     P[3].C[10].y[()] = 100
     P[3].C[10].outside[()] = 900
     assert P[3].C[10].y.is_input()
     assert P[3].C[10].outside.is_input()
 
     e = export(model, tmp_path, monkeypatch, use_slots=use_slots)
+    if workers > 1:
+        monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+        e._mx_collect_workers = workers
+    if collect_first:
+        result = e.P.collect()
+        assert not e.P._mx_itemspaces
     item = e.P[3]
     nested = item.C[10]
     assert e.P.ids() == (3, 1)
     assert nested.y() == 100
     assert nested.outside() == 900
-    assert e.P.collect().sum.y == P.collect().sum.y == 120
+    if not collect_first:
+        result = e.P.collect()
+    assert e.P.collect() is result
+    assert tuple(result.individual) == (3, 1)
+    assert [point.y for point in result.individual.values()] == [100, 20]
+    assert result.sum.y == P.collect().sum.y == 120
     assert e.P[3] is item
     assert item.C[10] is nested
     assert list(e.P._mx_itemspaces.values()) == [item]
@@ -396,6 +410,7 @@ def test_parallel_export_folds_nested_python_values_in_domain_order(tmp_path, mo
     assert sorted(evaluated) == sorted(keys)
     assert parallel.sum.metadata['fold'].value == serial.sum.metadata['fold'].value == live.sum.metadata['fold'].value
     assert parallel.sum.number == serial.sum.number == live.sum.number == sum(keys)
+    assert tuple(parallel.individual) == tuple(serial.individual) == tuple(live.individual) == keys
     assert {key: item.label for key, item in parallel.individual.items()} == {key: key for key in keys}
 
 
@@ -591,13 +606,36 @@ def test_a_stale_declaration_is_not_exported(model, tmp_path):
     assert not (tmp_path / 'stale_nomx').exists()
 
 
-def test_a_model_without_collect_has_no_collect_runtime(tmp_path):
+def test_a_model_without_collect_has_no_collect_runtime(tmp_path, monkeypatch):
     m = mx.new_model()
-    m.new_space('P', formula=lambda i: None).new_cells('x', 'lambda: i')
-    m.export(tmp_path / 'plain_nomx')
-    assert not (tmp_path / 'plain_nomx' / '_mx_collect.py').exists()
-    assert 'collect' not in (tmp_path / 'plain_nomx' / '_mx_classes.py').read_text()
-    m.close()
+    try:
+        m.new_space('P', formula=lambda i: None).new_cells('x', 'lambda: i')
+        package = tmp_path / 'plain_nomx'
+        m.export(package)
+        assert not list(package.rglob('_mx_collect*.py'))
+        assert 'collect' not in (package / '_mx_classes.py').read_text()
+        monkeypatch.syspath_prepend(str(tmp_path))
+        runtime = importlib.import_module('plain_nomx._mx_sys')
+        assert not hasattr(runtime, 'COLLECT_HOOK_VERSIONS')
+        assert not hasattr(runtime, 'collect_from_space')
+        assert not hasattr(runtime, 'release_collect_item')
+        assert importlib.import_module('plain_nomx').mx_model.P[4].x() == 4
+    finally:
+        m.close()
+
+
+def test_nested_collect_declaration_enables_exported_runtime(tmp_path, monkeypatch):
+    model = mx.new_model()
+    try:
+        parent = model.new_space('Parent')
+        child = parent.new_space('Child', formula='lambda i: None', refs={'ids': (2, 4)})
+        child.set_collect(over={'i': 'ids'}, outputs=lambda: {'sum': {'value': i}})
+        assert child.collect().sum.value == 6
+        exported = export(model, tmp_path, monkeypatch)
+        assert exported.Parent.Child.collect().sum.value == 6
+        assert not exported.Parent.Child._mx_itemspaces
+    finally:
+        model.close()
 
 
 # The collect hook (doc/source/reference/collect_hook.rst)
@@ -611,7 +649,9 @@ def install_hook(monkeypatch, space, hook, version=1):
 
 def test_hook_takes_over_collect(model, tmp_path, monkeypatch):
     e = export(model, tmp_path, monkeypatch)
-    collect_module = importlib.import_module(type(e).__module__.rsplit('.', 1)[0] + '._mx_collect')
+    package = type(e).__module__.rsplit('.', 1)[0]
+    collect_module = importlib.import_module(package + '._mx_collect')
+    runtime = importlib.import_module(package + '._mx_sys')
     calls = []
 
     def hook(space, coords, args):
@@ -619,7 +659,7 @@ def test_hook_takes_over_collect(model, tmp_path, monkeypatch):
         return collect_module.CollectResult({'sum': collect_module.CollectResult({'n': len(coords)})})
 
     install_hook(monkeypatch, e.P, hook)
-    assert _mx_sys.COLLECT_HOOK_VERSIONS == (1,)
+    assert runtime.COLLECT_HOOK_VERSIONS == (1,)
     r = e.P.collect(scen=2)
     assert r.sum.n == 4
     assert calls == [(e.P, (3, 1, 2, 7), (2,))]

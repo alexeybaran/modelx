@@ -38,7 +38,7 @@ from modelx.core.parent import BaseParent
 from modelx.core.model import Model
 from modelx.core.space import BaseSpace, DynamicSpace
 from modelx.core.cells import Cells
-from modelx.serialize.ziputil import write_str_utf8, copy_file
+from modelx.serialize.ziputil import copy_file, read_file, write_file, write_str_utf8
 from modelx.core.util import abs_to_rel_tuple
 
 from . import _mx_sys
@@ -325,6 +325,22 @@ class Exporter:
             for child in parent.spaces.values():
                 que.append(child)
 
+    def _write_collect_runtime(self):
+        """Insert the Collect extension at its original positions in _mx_sys.py."""
+        from ._mx_collect_runtime import COLLECT_HELPERS, COLLECT_IMPORTS
+
+        base = read_file(lambda stream: stream.read(), this_dir / '_mx_sys.py', 'b')
+        newline = b'\r\n' if b'\r\n' in base else b'\n'
+        imports = COLLECT_IMPORTS.replace(b'\n', newline)
+        helpers = COLLECT_HELPERS.replace(b'\n', newline)
+
+        typing_import = b'from typing import Dict'
+        io_class = b'class MiniBaseSharedIO:'
+        stdlib, body = base.split(typing_import, 1)
+        spaces, io = body.split(io_class, 1)
+        runtime = stdlib + imports + typing_import + spaces + helpers + io_class + io
+        write_file(lambda stream: stream.write(runtime), self.path / '_mx_sys.py', 'b')
+
     def export(self):
         collect_spaces = self.model._impl.collect_spaces
         for space in collect_spaces:
@@ -343,9 +359,11 @@ class Exporter:
             self.path / (MODEL_MODULE + '.py'))
 
         # Write _mx_sys.py
-        copy_file(this_dir / '_mx_sys.py', self.path / '_mx_sys.py')
         if collect_spaces:
+            self._write_collect_runtime()
             copy_file(this_dir / '_mx_collect.py', self.path / '_mx_collect.py')
+        else:
+            copy_file(this_dir / '_mx_sys.py', self.path / '_mx_sys.py')
         
         # Write _mx_macros.py if macros exist
         if self.model.macros:
