@@ -159,14 +159,21 @@ def test_collect_follows_new_updated_and_removed_nested_inputs(model):
     P = model.P
     Child = P.new_space('Child', formula=lambda j: None)
     Child.new_cells('amount', lambda t: i + j + t)
-    P.collect_outputs.formula = lambda: {'sum': {'amount': Child[10].amount(1)}}
+    Child.new_cells('identity', lambda: id(_space))
+    P.collect_outputs.formula = lambda: {
+        'individual': {'identity': Child.identity()},
+        'sum': {'amount': Child[10].amount(1)}}
+
+    first = P.collect()
+    assert first.sum.amount == 105
+    assert not P.itemspaces
     child = P[1].Child
     nested = child[10]
-    assert nested.amount(1) == 12
-    assert P.collect().sum.amount == 105
 
     nested.amount[1] = 100
-    assert P.collect().sum.amount == 193
+    updated = P.collect()
+    assert updated.sum.amount == 193
+    assert updated.individual[1].identity != child.identity()
     nested.amount[1] = 200
     assert P.collect().sum.amount == 293
     nested.amount.clear_at(1)
