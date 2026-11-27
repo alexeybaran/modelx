@@ -45,24 +45,32 @@ class CollectResult:
     the domain. A named output that is a dict is a :class:`CollectedSeries`.
     """
 
-    __slots__ = ('_fields',)
+    __slots__ = ('__storage',)
 
     def __init__(self, fields):
-        self._fields = {
+        self.__storage = {
             name: CollectedSeries(value) if type(value) is dict else value
             for name, value in fields.items()}
+
+    @property
+    def _fields(self):
+        storage = self.__storage
+        if type(storage) is _NativeFields:
+            for name in storage.native.fields:
+                storage[name]
+            return storage.views
+        return storage
 
     def __getattr__(self, name):
         # object.__getattribute__: a bare instance, as copy and pickle
         # create it, has no _fields yet and must not recurse here.
         try:
-            return object.__getattribute__(self, '_fields')[name]
+            return object.__getattribute__(self, '_CollectResult__storage')[name]
         except KeyError:
             raise AttributeError(name) from None
 
     def __reduce__(self):
-        fields = self._fields
-        return type(self), (dict(fields) if type(fields) is _NativeFields else fields,)
+        return type(self), (self._fields,)
 
     def __dir__(self):
         return sorted(set(object.__dir__(self)) | set(self._fields))
@@ -90,16 +98,9 @@ class _NativeFields:
             value = CollectedSeries(value)
         return views.setdefault(name, value)
 
-    def __iter__(self):
-        return iter(self.native.fields)
-
-    def keys(self):
-        return self.native.fields
-
-
 def _native_result(native, individual=False):
     result = CollectResult.__new__(CollectResult)
-    result._fields = _NativeFields(native, individual)
+    result._CollectResult__storage = _NativeFields(native, individual)
     return result
 
 
