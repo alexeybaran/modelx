@@ -256,20 +256,23 @@ def _depends_on(flight, other):
 
 
 def _collect_parallel(coords, evaluate, accumulator, workers):
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
     from itertools import islice
 
-    # Keep at most one submitted item per worker. Accumulate on this
-    # thread, including when addition calls Python code.
+    # Workers may finish in any order. Fold their outputs in domain
+    # order, with at most one outstanding item per worker.
     remaining = iter(coords)
+    exhausted = object()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending = {pool.submit(evaluate, c): c for c in islice(remaining, workers)}
+        pending = deque((c, pool.submit(evaluate, c)) for c in islice(remaining, workers))
         while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for task in done:
-                accumulator.add(pending.pop(task), task.result())
-            for c in islice(remaining, len(done)):
-                pending[pool.submit(evaluate, c)] = c
+            coordinate, task = pending.popleft()
+            accumulator.add(coordinate, task.result())
+            del task
+            coordinate = next(remaining, exhausted)
+            if coordinate is not exhausted:
+                pending.append((coordinate, pool.submit(evaluate, coordinate)))
 
 
 def _collect_once(space, coords, item, cache, key, workers):

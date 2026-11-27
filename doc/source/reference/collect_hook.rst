@@ -23,8 +23,8 @@ Use the same shared dependency rules as for caller-managed threads
 (:func:`~modelx.export_model`). The private items must be independent.
 List the Spaces they share in ``locked_spaces``. Shared references and
 public Direct items keep their export locks. Each private item is
-released after its outputs are copied. Parallel sums can vary in
-floating-point rounding because different items may finish first.
+released after its outputs are copied. Standalone Collect folds these
+outputs in domain order, including when the items finish out of order.
 
 Parallel evaluation supports coordinates and arguments made up of exact
 built-in immutable values such as integers, strings and tuples of those
