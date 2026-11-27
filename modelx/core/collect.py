@@ -122,11 +122,12 @@ class CollectNode(NodeFactory):
 class _CollectFrame:
     """Private item tree and the external dependencies it observes."""
 
-    def __init__(self, caller, nodes, refs, enclosing):
+    def __init__(self, caller, nodes, refs, enclosing, names_by_code):
         self.caller = caller
         self.nodes = nodes
         self.refs = refs
         self.enclosing = enclosing
+        self.names_by_code = names_by_code
         self.dynamic_cache = {}
         self.spaces = {}    # private Space -> matching Direct Space, if any
         self._visited = set()
@@ -174,7 +175,14 @@ class _CollectFrame:
         # A bare global in a modelx formula doesn't pass through add_reference.
         if obj not in self._visited and hasattr(obj, '_get_referents'):
             self._visited.add(obj)
-            for ref in obj._get_referents()['refs'].values():
+            code = obj.altfunc.__code__
+            names = self.names_by_code.get(code)
+            if names is None:
+                names = tuple(obj._extract_globals(code))
+                self.names_by_code[code] = names
+            # The names are common to each copy of the formula. Their
+            # Reference bindings still come from this item's namespace.
+            for ref in obj._get_referents(global_names=names)['refs'].values():
                 if isinstance(ref, ReferenceImpl) and self.owner_of(ref) is None:
                     self.refs.add(ref)
 
@@ -194,6 +202,7 @@ class _CollectFrame:
         self.spaces.clear()
         self.dynamic_cache.clear()
         self._visited.clear()
+        self.names_by_code = None
 
 
 class CollectRunner(NodeFactoryImpl):
@@ -306,13 +315,14 @@ class CollectRunner(NodeFactoryImpl):
         values = dict(zip(self.formula.parameters, key))
         accumulator = Accumulator()
         nodes, refs, bases = set(), set(), set()
+        names_by_code = {}
         for coordinate in normalize_domain(self.domain_value()):
             values[self.parameter] = coordinate
             bound = BoundArguments(
                 signature, OrderedDict((name, values[name]) for name in signature.parameters))
             item_key = get_node(space, bound.args, bound.kwargs)[KEY]
             previous_frame = executor.collect_frame
-            frame = _CollectFrame(caller, nodes, refs, previous_frame)
+            frame = _CollectFrame(caller, nodes, refs, previous_frame, names_by_code)
             executor.collect_frame = frame
             try:
                 item = frame.new_item(space, item_key)

@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import modelx as mx
+from modelx.core.binding.boundfunc import AlteredFunction
 from modelx.core.errors import FormulaError
 from modelx.core.space import UserSpaceImpl
 from modelx.core.execution.trace import TraceGraph
@@ -153,6 +154,42 @@ def test_collect_never_publishes_private_itemspaces(model):
     P.collect()
     assert seen == [0] * 7
     assert not P.itemspaces
+
+
+def test_collect_analyzes_shared_code_once_and_resolves_each_binding(model, monkeypatch):
+    low = model.new_space('Low', refs={'rate': 2})
+    low.new_cells('value', 'lambda: rate')
+    low.new_cells('collect_outputs', 'lambda: {"individual": {"value": value()}}')
+    high = model.new_space('High', bases=low)
+    high.rate = 7
+    projection = model.new_space(
+        'Projection', bases=low, formula='lambda i: {"base": A if i == 1 else B}',
+        refs={'A': low, 'B': high, 'ids': (1, 2)})
+    projection.set_collect(over={'i': 'ids'})
+
+    shared_code = low.value.formula.func.__code__
+    assert high.value.formula.func.__code__ is shared_code
+    analyses = []
+    original = AlteredFunction._extract_globals
+
+    def extract(function, code):
+        if code is shared_code:
+            analyses.append(code)
+        return original(function, code)
+
+    monkeypatch.setattr(AlteredFunction, '_extract_globals', extract)
+    result = projection.collect()
+    assert [item.value for item in result.individual.values()] == [2, 7]
+    assert analyses == [shared_code]
+    caller = (projection._impl.collect_runner, ())
+    for base in (low, high):
+        assert model._impl.refgraph.has_edge(base._impl.own_refs['rate'], caller)
+    assert projection.collect() is result
+
+    high.rate = 11
+    updated = projection.collect()
+    assert [item.value for item in updated.individual.values()] == [2, 11]
+    assert analyses == [shared_code, shared_code]
 
 
 def test_collect_follows_new_updated_and_removed_nested_inputs(model):
