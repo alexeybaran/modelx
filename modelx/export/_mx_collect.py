@@ -39,26 +39,49 @@ class CollectedSeries(dict):
 class CollectResult:
     """The value of ``collect()``.
 
-    ``result.individual`` is a dict from each coordinate, in domain order,
+    ``result.individual`` is a dict from each coordinate
     to a CollectResult of that item's ``individual`` outputs;
     ``result.sum`` is a CollectResult of the ``sum`` outputs added over
     the domain. A named output that is a dict is a :class:`CollectedSeries`.
     """
 
-    __slots__ = ('_fields',)
+    __slots__ = ('_data', '_mx_native')
 
     def __init__(self, fields):
-        self._fields = {
+        self._data = {
             name: CollectedSeries(value) if type(value) is dict else value
             for name, value in fields.items()}
+        self._mx_native = None
+
+    @classmethod
+    def _from_native(cls, native):
+        result = cls.__new__(cls)
+        result._data = {}
+        result._mx_native = native
+        return result
+
+    @property
+    def _fields(self):
+        native = self._mx_native
+        if native is not None:
+            for name in native.fields:
+                getattr(self, name)
+        return self._data
 
     def __getattr__(self, name):
         # object.__getattribute__: a bare instance, as copy and pickle
         # create it, has no _fields yet and must not recurse here.
         try:
-            return object.__getattribute__(self, '_fields')[name]
+            data = object.__getattribute__(self, '_data')
+            return data[name]
         except KeyError:
-            raise AttributeError(name) from None
+            native = object.__getattribute__(self, '_mx_native')
+            if native is None or name not in native.fields:
+                raise AttributeError(name) from None
+            value = native.materialize(name)
+            if type(value) is dict:
+                value = CollectedSeries(value)
+            return data.setdefault(name, value)
 
     def __reduce__(self):
         return type(self), (self._fields,)

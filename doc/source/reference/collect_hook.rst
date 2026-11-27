@@ -44,6 +44,11 @@ signature order. Release the returned item with ``_mx_sys.release_collect_item``
 after detaching its output, including when evaluation or output preparation
 raises.
 
+A compiled hook can keep its numeric storage behind a ``CollectResult``.
+The exported runtime caches that result directly. Python access to its
+``individual`` or ``sum`` section builds the corresponding Python view.
+Generated numeric consumers can read the retained storage directly.
+
 What the result holds
 ---------------------
 
@@ -57,7 +62,7 @@ item at each coordinate ``c`` is read in domain order, as modelx does::
     result = accumulator.result()
 
 That is, ``result.individual`` (when ``collect_outputs`` returns an
-``'individual'`` section) maps each coordinate, in domain order, to a
+``'individual'`` section) maps each coordinate to a
 ``CollectResult`` of that item's individual outputs, and ``result.sum``
 (when it returns a ``'sum'`` section) is a ``CollectResult`` of the sums.
 modelx adds a sum as ``total = total + value``, item after item, so a
