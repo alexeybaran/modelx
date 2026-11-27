@@ -28,7 +28,7 @@ invalidates the node when the item's templates change.
 
 from collections import OrderedDict
 from inspect import BoundArguments, Parameter, Signature
-from types import MethodType
+from types import FunctionType, MethodType
 
 from modelx.core.base import Interface, Impl
 from modelx.core.binding.namespace import BaseNamespace
@@ -77,6 +77,8 @@ def parse_declaration(space, over, outputs):
             "of a Cells or a Reference of the Space")
     formula = None
     if outputs is not None:
+        if not isinstance(outputs, FunctionType):
+            raise TypeError("collect_outputs must be a Python function")
         formula = Formula(outputs)
         if formula.parameters:
             raise TypeError("collect_outputs must take no arguments")

@@ -34,9 +34,9 @@ Enhancements
       >>> space.collect().sum.pv
       60.0
 
-  The domain is a zero-argument Cells or a Reference of the Space, and
-  ``collect_outputs`` is a Cells that returns an ``'individual'``
-  section, a ``'sum'`` section or both. ``collect()`` takes the other
+  The domain is a zero-argument Cells or a Reference of the Space. Give
+  the output formula as a zero-argument Python function that returns an
+  ``'individual'`` section, a ``'sum'`` section or both. ``collect()`` takes the other
   parameters of the Space formula. It evaluates each coordinate in a
   temporary ItemSpace and releases it before the next. Direct access
   and ``collect()`` share explicitly assigned inputs and keep separate

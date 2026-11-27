@@ -829,8 +829,8 @@ class UserSpace(BaseSpace, EditableParent):
                 The domain's value must be a non-empty sequence of
                 distinct, hashable coordinates. :obj:`None` removes the
                 declaration and keeps the ``collect_outputs`` Cells.
-            outputs (optional): The formula of the ``collect_outputs``
-                Cells, which this method creates or replaces. It takes
+            outputs (function, optional): A Python function for the
+                ``collect_outputs`` Cells, which this method creates or replaces. It takes
                 no arguments and returns a dict with an ``'individual'``
                 section, a ``'sum'`` section or both, each a dict of names
                 to values. Omit it to keep an existing ``collect_outputs``.

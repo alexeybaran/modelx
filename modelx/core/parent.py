@@ -118,7 +118,7 @@ class EditableParent(BaseParent):
                 does with ``over``: a dict of one parameter of ``formula``
                 to the name of a Cells or a Reference of the new space.
                 Give it together with ``collect_outputs``.
-            collect_outputs (optional): The formula of the
+            collect_outputs (function, optional): The Python function for the
                 ``collect_outputs`` Cells that the new space gets, as
                 ``outputs`` of :meth:`~modelx.core.space.UserSpace.set_collect`.
 

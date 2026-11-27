@@ -497,6 +497,19 @@ def test_new_space_declares_collect():
     m.close()
 
 
+def test_collect_declarations_reject_strings(model):
+    source = "lambda: {'sum': {'i': i}}"
+    previous = model.P.collect()
+    with pytest.raises(TypeError, match="collect_outputs must be a Python function"):
+        model.P.set_collect(over={'i': model.P.ids}, outputs=source)
+    assert model.P.collect() is previous
+
+    with pytest.raises(TypeError, match="collect_outputs must be a Python function"):
+        model.new_space('StringCollect', formula=lambda i: None, refs={'ids': (1, 2)},
+                        collect_over={'i': 'ids'}, collect_outputs=source)
+    assert 'StringCollect' not in model.spaces
+
+
 def test_a_stale_declaration_raises_until_set_again(model):
     P = model.P
     P.formula = lambda j: None
@@ -528,19 +541,19 @@ def test_invalid_domains(model, domain, error):
 
 
 @pytest.mark.parametrize("out, error", [
-    ("{'sum': {'x': [1.0, 2.0]}}", TypeError),
-    ("{'sum': {'x': 'a'}}", TypeError),
-    ("{'sum': {'x': {1: 1}}}", None),
-    ("{'other': {'x': 1}}", TypeError),
-    ("{}", TypeError),
-    ("{'sum': {}}", TypeError),
-    ("{'individual': {'x': [_space]}}", TypeError),
+    (lambda: {'sum': {'x': [1.0, 2.0]}}, TypeError),
+    (lambda: {'sum': {'x': 'a'}}, TypeError),
+    (lambda: {'sum': {'x': {1: 1}}}, None),
+    (lambda: {'other': {'x': 1}}, TypeError),
+    (lambda: {}, TypeError),
+    (lambda: {'sum': {}}, TypeError),
+    (lambda: {'individual': {'x': [_space]}}, TypeError),
 ])
 def test_invalid_outputs(out, error):
     m = mx.new_model()
     P = m.new_space('P', formula=lambda i: None)
     P.ids = (1, 2)
-    P.set_collect(over={'i': 'ids'}, outputs="lambda: " + out)
+    P.set_collect(over={'i': 'ids'}, outputs=out)
     if error is None:
         assert P.collect().sum.x == {1: 2}
     else:
