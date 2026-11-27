@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 import modelx as mx
-from modelx.export import _mx_sys
 
 _counter = itertools.count()
 
@@ -254,13 +253,22 @@ def test_a_stale_declaration_is_not_exported(model, tmp_path):
     assert not (tmp_path / 'stale_nomx').exists()
 
 
-def test_a_model_without_collect_has_no_collect_runtime(tmp_path):
+def test_a_model_without_collect_has_no_collect_runtime(tmp_path, monkeypatch):
     m = mx.new_model()
-    m.new_space('P', formula=lambda i: None).new_cells('x', 'lambda: i')
-    m.export(tmp_path / 'plain_nomx')
-    assert not (tmp_path / 'plain_nomx' / '_mx_collect.py').exists()
-    assert 'collect' not in (tmp_path / 'plain_nomx' / '_mx_classes.py').read_text()
-    m.close()
+    try:
+        m.new_space('P', formula=lambda i: None).new_cells('x', 'lambda: i')
+        package = tmp_path / 'plain_nomx'
+        m.export(package)
+        assert not (package / '_mx_collect.py').exists()
+        assert 'collect' not in (package / '_mx_classes.py').read_text()
+        monkeypatch.syspath_prepend(str(tmp_path))
+        runtime = importlib.import_module('plain_nomx._mx_sys')
+        assert not hasattr(runtime, 'COLLECT_HOOK_VERSIONS')
+        assert not hasattr(runtime, 'collect_from_space')
+        assert not hasattr(runtime, 'release_collect_item')
+        assert importlib.import_module('plain_nomx').mx_model.P[4].x() == 4
+    finally:
+        m.close()
 
 
 # The collect hook (doc/source/reference/collect_hook.rst)
@@ -274,7 +282,9 @@ def install_hook(monkeypatch, space, hook, version=1):
 
 def test_hook_takes_over_collect(model, tmp_path, monkeypatch):
     e = export(model, tmp_path, monkeypatch)
-    collect_module = importlib.import_module(type(e).__module__.rsplit('.', 1)[0] + '._mx_collect')
+    package = type(e).__module__.rsplit('.', 1)[0]
+    collect_module = importlib.import_module(package + '._mx_collect')
+    runtime = importlib.import_module(package + '._mx_sys')
     calls = []
 
     def hook(space, coords, args):
@@ -282,7 +292,7 @@ def test_hook_takes_over_collect(model, tmp_path, monkeypatch):
         return collect_module.CollectResult({'sum': collect_module.CollectResult({'n': len(coords)})})
 
     install_hook(monkeypatch, e.P, hook)
-    assert _mx_sys.COLLECT_HOOK_VERSIONS == (1,)
+    assert runtime.COLLECT_HOOK_VERSIONS == (1,)
     r = e.P.collect(scen=2)
     assert r.sum.n == 4
     assert calls == [(e.P, (3, 1, 2, 7), (2,))]
