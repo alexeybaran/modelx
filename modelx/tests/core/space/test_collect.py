@@ -376,9 +376,55 @@ def test_error_leaves_no_itemspace_and_no_result(model):
     with pytest.raises(FormulaError) as info:
         P.collect()
     assert 'ZeroDivisionError' in str(info.value)
+    assert '.cf(t=0)' in str(info.value)
     assert not P.itemspaces
     P.cf.formula = lambda t: i * 1.0
     assert P.collect().sum.pv == loop(P)[1]['pv']
+
+
+def test_collect_releases_caught_private_rollbacks(model):
+    P = model.P
+    rates = model.new_space('Rates')
+    rates.new_cells('amount', 'lambda: 2')
+    unrelated = rates.new_cells('unrelated_failure', 'lambda: 1 / 0')
+    P.rates = rates
+    P.new_cells('private_failure', 'lambda: 1 / 0')
+    rolledback = P._impl.system.executor.rolledback
+    starting_rollbacks = tuple(rolledback)
+    observed_sizes = []
+    P.observe_rollbacks = lambda: observed_sizes.append(len(rolledback))
+
+    def recover_outputs():
+        observe_rollbacks()
+        try:
+            private_failure()
+        except ZeroDivisionError:
+            return {'sum': {'value': i * rates.amount()}}
+
+    P.collect_outputs.formula = recover_outputs
+    direct = P[1]
+    direct_value = direct.cf(0)
+    direct_items = dict(P._impl.param_spaces)
+
+    result = P.collect()
+    assert result.sum.value == 56
+    assert observed_sizes == [len(starting_rollbacks)] * len(P.ids())
+    assert tuple(rolledback) == starting_rollbacks
+    assert P.collect() is result
+    assert dict(P._impl.param_spaces) == direct_items
+    assert P[1] is direct
+    assert direct.cf(0) == direct_value
+    assert not len(direct.private_failure)
+    assert not len(direct.collect_outputs)
+
+    rates.amount.formula = 'lambda: 3'
+    assert P.collect().sum.value == 84
+    assert tuple(rolledback) == starting_rollbacks
+
+    with pytest.raises(FormulaError, match='ZeroDivisionError') as info:
+        unrelated()
+    assert mx.get_traceback()[0][0] == unrelated.node()
+    assert 'private_failure' not in str(info.value)
 
 
 def test_collect_is_defined_only_where_declared(model):

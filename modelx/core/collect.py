@@ -33,7 +33,7 @@ from types import MethodType
 from modelx.core.base import Interface, Impl
 from modelx.core.binding.namespace import BaseNamespace
 from modelx.core.cells import Cells, CellsImpl
-from modelx.core.execution.trace import get_node, key_to_node, node_get_args, KEY
+from modelx.core.execution.trace import get_node, key_to_node, node_get_args, KEY, OBJ
 from modelx.core.formula import Formula
 from modelx.core.node import NodeFactory, NodeFactoryImpl
 from modelx.core.reference import ReferenceImpl, ReferenceProxy
@@ -200,6 +200,14 @@ class _CollectFrame:
             arguments=node_get_args(key_to_node(space, key)), cache=None,
             frame=self, direct=space.param_spaces.get(key))
 
+    def discard_private_rollbacks(self, rolledback, start):
+        retained = []
+        for _ in range(len(rolledback) - start):
+            node = rolledback.pop()
+            if not self.owns(node[OBJ]):
+                retained.append(node)
+        rolledback.extend(reversed(retained))
+
     def release(self):
         for space in reversed(self.spaces):
             space._release_collect_space()
@@ -320,6 +328,7 @@ class CollectRunner(NodeFactoryImpl):
         accumulator = Accumulator()
         nodes, refs, bases = set(), set(), set()
         names_by_code = {}
+        rolledback = executor.rolledback
         for coordinate in normalize_domain(self.domain_value()):
             values[self.parameter] = coordinate
             bound = BoundArguments(
@@ -328,11 +337,15 @@ class CollectRunner(NodeFactoryImpl):
             previous_frame = executor.collect_frame
             frame = _CollectFrame(caller, nodes, refs, previous_frame, names_by_code)
             executor.collect_frame = frame
+            rollback_start = len(rolledback)
             try:
                 item = frame.new_item(space, item_key)
                 outputs = prepare_output(item.cells[OUTPUTS].interface(), _LIVE_TYPES)
                 accumulator.add(coordinate, outputs)
                 bases.update(sp._dynbase.idstr for sp in frame.spaces)
+                if len(rolledback) > rollback_start:
+                    # Caught errors no longer need to retain this coordinate's Cells.
+                    frame.discard_private_rollbacks(rolledback, rollback_start)
             finally:
                 executor.collect_frame = previous_frame
                 frame.release()
