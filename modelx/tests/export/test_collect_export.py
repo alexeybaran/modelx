@@ -261,7 +261,6 @@ def test_parallel_export_overlaps_private_items_and_shares_locked_dependencies(
         pytest.skip('requires free-threaded Python with the GIL off')
 
     P = model.P
-    P[3].cf[0] = 81.0
     shared = model.new_space('Shared')
     table = shared.new_space('Table', formula=lambda key: None, refs={'keys': (7, 9)})
     table.new_cells('offset', lambda: 2 * key)
@@ -270,8 +269,12 @@ def test_parallel_export_overlaps_private_items_and_shares_locked_dependencies(
     P.collect_outputs.formula = lambda: {
         'individual': {'series': {0: cf(0)}, 'values': [i, 'policy']},
         'sum': {'value': C.y() + shared.Table.collect().sum.value + shared.Table[7].offset()}}
+    P[3].cf[0] = 81.0
+    assert P[3].cf.is_input(0)
+    assert P[3].cf(0) == 81.0
     serial = export(model, tmp_path, monkeypatch, locked_spaces=['P', 'Shared'])
     expected = serial.P.collect()
+    assert expected.individual[3].series[0] == 81.0
     e = export(model, tmp_path, monkeypatch, locked_spaces=['P', 'Shared'])
     e._mx_collect_workers = 4
     direct = e.P[3]
