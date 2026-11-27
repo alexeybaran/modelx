@@ -176,10 +176,14 @@ class _CollectFrame:
         if obj not in self._visited and hasattr(obj, '_get_referents'):
             self._visited.add(obj)
             code = obj.altfunc.__code__
-            names = self.names_by_code.get(code)
-            if names is None:
+            identity = id(code)
+            entry = self.names_by_code.get(identity)
+            if entry is None:
                 names = tuple(obj._extract_globals(code))
-                self.names_by_code[code] = names
+                # Keep the code alive so its identity cannot be reused.
+                self.names_by_code[identity] = (code, names)
+            else:
+                names = entry[1]
             # The names are common to each copy of the formula. Their
             # Reference bindings still come from this item's namespace.
             for ref in obj._get_referents(global_names=names)['refs'].values():

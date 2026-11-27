@@ -1,5 +1,6 @@
 import copy
 import pickle
+from types import FunctionType
 
 import numpy as np
 import pytest
@@ -190,6 +191,17 @@ def test_collect_analyzes_shared_code_once_and_resolves_each_binding(model, monk
     updated = projection.collect()
     assert [item.value for item in updated.individual.values()] == [2, 11]
     assert analyses == [shared_code, shared_code]
+
+
+def test_collect_accepts_sourceless_formula_with_unhashable_constant(model):
+    P = model.P
+    original = compile('lambda: rate', '<collect-regression>', 'eval').co_consts[0]
+    code = original.replace(co_consts=(*original.co_consts, []))
+    with pytest.warns(UserWarning, match='Cannot retrieve source code'):
+        cell = P.new_cells('read_rate', FunctionType(code, {}))
+    assert cell.formula.source is None
+    P.collect_outputs.formula = lambda: {'sum': {'value': read_rate()}}
+    assert P.collect().sum.value == pytest.approx(7 * P.rate)
 
 
 def test_collect_follows_new_updated_and_removed_nested_inputs(model):
