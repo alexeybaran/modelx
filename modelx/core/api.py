@@ -1518,8 +1518,11 @@ def export_model(model, path, use_slots=True, locked_spaces=None):
     cached takes the lock shared by all the locked Spaces of the model,
     checks the cache again and calculates while the other threads wait. A
     cached value is returned without taking the lock, so the lock costs
-    nothing once the value exists. Formulas of locked Spaces never run at
-    the same time as each other. The lock is re-entrant, so Cells of locked
+    nothing once the value exists. Formulas evaluated with this shared
+    lock run one at a time. A compiler may evaluate the private ItemSpaces
+    of a declared ``collect()`` in parallel. The shared dependencies they
+    call must support concurrent access, for example through
+    ``locked_spaces``. The lock is re-entrant, so Cells of locked
     Spaces can call each other and recurse freely. A formula that raises
     leaves no cached value and is run again by the next caller, as in
     modelx. Spaces not listed are exported exactly as before.

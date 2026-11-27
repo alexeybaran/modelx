@@ -160,7 +160,8 @@ def test_collect_follows_new_updated_and_removed_nested_inputs(model):
     Child = P.new_space('Child', formula=lambda j: None)
     Child.new_cells('amount', lambda t: i + j + t)
     P.collect_outputs.formula = lambda: {'sum': {'amount': Child[10].amount(1)}}
-    nested = P[1].Child[10]
+    child = P[1].Child
+    nested = child[10]
     assert nested.amount(1) == 12
     assert P.collect().sum.amount == 105
 
@@ -170,8 +171,68 @@ def test_collect_follows_new_updated_and_removed_nested_inputs(model):
     assert P.collect().sum.amount == 293
     nested.amount.clear_at(1)
     assert P.collect().sum.amount == 105
+    assert child is P[1].Child
     assert nested is P[1].Child[10]
     assert not len(nested.amount)
+
+
+def test_collect_can_call_another_collect_with_durable_arguments(model):
+    P = model.P
+    Q = model.new_space('Q', formula=lambda j, amount: None, refs={'keys': (1, 2)})
+    Q.new_cells('value', lambda: j * amount)
+    Q.set_collect(over={'j': 'keys'}, outputs=lambda: {'sum': {'value': value()}})
+    P.Q = Q
+    P.collect_outputs.formula = lambda: {'sum': {'value': Q.collect(i).sum.value}}
+    assert P.collect().sum.value == 84
+    Q.value.formula = lambda: 2 * j * amount
+    assert P.collect().sum.value == 168
+    assert not P.itemspaces
+    assert not Q.itemspaces
+
+
+@pytest.mark.parametrize('warm_private', [False, True])
+@pytest.mark.parametrize('nested_collect', [False, True])
+def test_cached_external_calls_cannot_read_a_private_item(model, warm_private, nested_collect):
+    P = model.P
+    Q = model.new_space('Q', formula=lambda j: None, refs={'keys': (1,)})
+    P.Q = Q
+    P.warm_private = warm_private
+    P.bridge = Q.bridge = {}
+    P.new_cells('value', lambda: i)
+    Q.new_cells('read', lambda: bridge['callback']())
+    if nested_collect:
+        Q.set_collect(over={'j': 'keys'}, outputs=lambda: {'sum': {'value': read()}})
+        P.new_cells('external', lambda: Q.collect().sum.value)
+    else:
+        P.new_cells('external', lambda: Q.read())
+
+    def checked_outputs():
+        if warm_private:
+            value()
+        bridge['callback'] = value
+        try:
+            return {'sum': {'value': external()}}
+        finally:
+            del bridge['callback']
+
+    P.collect_outputs.formula = checked_outputs
+    with pytest.raises(FormulaError, match='cached external formula cannot read a temporary Collect ItemSpace'):
+        P.collect()
+    assert len(Q.read) == 0
+    assert not P.itemspaces
+    assert not Q.itemspaces
+
+
+def test_cached_external_calls_cannot_store_private_item_keys(model):
+    P = model.P
+    Q = model.new_space('Q')
+    P.Q = Q
+    Q.new_cells('read', lambda item: item.cf(0))
+    P.collect_outputs.formula = lambda: {'sum': {'value': Q.read(_space)}}
+    with pytest.raises(FormulaError, match='cached external formula cannot take a temporary Collect ItemSpace'):
+        P.collect()
+    assert len(Q.read) == 0
+    assert Q.read(P[1]) == P[1].cf(0)
 
 
 @pytest.mark.parametrize("edit", [

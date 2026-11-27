@@ -106,9 +106,11 @@ def test_export_preserves_authored_inputs_in_both_routes(model, tmp_path, monkey
     P.C.formula = lambda j: None
     P.C.y.formula = lambda: 10 * i + j
     P.C.new_cells('outside', lambda: i + j)
+    P.collect_outputs.formula = lambda: {'sum': {'y': C[10].y()}}
     P[3].C[10].y[()] = 100
     P[3].C[10].outside[()] = 900
-    P.collect_outputs.formula = lambda: {'sum': {'y': C[10].y()}}
+    assert P[3].C[10].y.is_input()
+    assert P[3].C[10].outside.is_input()
 
     e = export(model, tmp_path, monkeypatch, use_slots=use_slots)
     item = e.P[3]

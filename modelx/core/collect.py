@@ -28,6 +28,7 @@ invalidates the node when the item's templates change.
 
 from collections import OrderedDict
 from inspect import BoundArguments, Parameter, Signature
+from types import MethodType
 
 from modelx.core.base import Interface, Impl
 from modelx.core.binding.namespace import BaseNamespace
@@ -121,16 +122,31 @@ class CollectNode(NodeFactory):
 class _CollectFrame:
     """Private item tree and the external dependencies it observes."""
 
-    def __init__(self, caller, nodes, refs):
+    def __init__(self, caller, nodes, refs, enclosing):
         self.caller = caller
         self.nodes = nodes
         self.refs = refs
+        self.enclosing = enclosing
         self.dynamic_cache = {}
         self.spaces = {}    # private Space -> matching Direct Space, if any
         self._visited = set()
 
     def owns(self, obj):
         return obj in self.spaces or getattr(obj, 'parent', None) in self.spaces
+
+    def owner_of(self, obj):
+        frame = self
+        while frame is not None:
+            if frame.owns(obj):
+                return frame
+            frame = frame.enclosing
+
+    def owns_argument(self, value):
+        if isinstance(value, (Interface, BaseNamespace)):
+            return self.owner_of(value._impl) is not None
+        if isinstance(value, MethodType) and isinstance(value.__self__, CellsImpl):
+            return self.owner_of(value.__self__) is not None
+        return False
 
     def direct_item(self, parent, key):
         direct = self.spaces.get(parent)
@@ -148,7 +164,7 @@ class _CollectFrame:
         if obj not in self._visited and hasattr(obj, '_get_referents'):
             self._visited.add(obj)
             for ref in obj._get_referents()['refs'].values():
-                if isinstance(ref, ReferenceImpl) and not self.owns(ref):
+                if isinstance(ref, ReferenceImpl) and self.owner_of(ref) is None:
                     self.refs.add(ref)
 
     def new_item(self, space, key):
@@ -284,8 +300,8 @@ class CollectRunner(NodeFactoryImpl):
             bound = BoundArguments(
                 signature, OrderedDict((name, values[name]) for name in signature.parameters))
             item_key = get_node(space, bound.args, bound.kwargs)[KEY]
-            frame = _CollectFrame(caller, nodes, refs)
             previous_frame = executor.collect_frame
+            frame = _CollectFrame(caller, nodes, refs, previous_frame)
             executor.collect_frame = frame
             try:
                 item = frame.new_item(space, item_key)

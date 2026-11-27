@@ -33,15 +33,21 @@ class NonThreadedExecutor:
         key = node[KEY]
         frame = self.collect_frame
 
-        if frame is not None and frame.owns(obj):
-            if obj.is_cached:
-                if obj.has_node(key):
-                    return obj.data[key]
-                source = frame.input_source(obj, key)
-                if source is not None:
-                    frame.nodes.add((source, key))
-                    return source.data[key]
-            return self._eval_formula(node)
+        if frame is not None:
+            owner = frame.owner_of(obj)
+            if owner is not None:
+                self._check_collect_boundary(owner)
+                if obj.is_cached:
+                    if obj.has_node(key):
+                        return obj.data[key]
+                    source = owner.input_source(obj, key)
+                    if source is not None:
+                        owner.nodes.add((source, key))
+                        return source.data[key]
+                return self._eval_formula(node)
+            if obj.is_cached and any(frame.owns_argument(arg) for arg in key):
+                raise RuntimeError(
+                    'A cached external formula cannot take a temporary Collect ItemSpace argument')
 
         if obj.is_cached and obj.has_node(key):
             value = obj.data[key]
@@ -63,6 +69,11 @@ class NonThreadedExecutor:
                 value = self._start_exec(node)
 
         return value
+
+    def _check_collect_boundary(self, owner):
+        pred = self.callstack.idxstack[-1]
+        if pred < 0 or self.callstack[pred] != owner.caller:
+            raise RuntimeError('A cached external formula cannot read a temporary Collect ItemSpace')
 
     def _eval_formula(self, node: TraceNode):
 
@@ -140,6 +151,11 @@ class NonThreadedExecutor:
 
     def add_reference(self, ref):
         if self.is_executing:
+            frame = self.collect_frame
+            if frame is not None:
+                owner = frame.owner_of(ref)
+                if owner is not None:
+                    self._check_collect_boundary(owner)
             self.refstack.append((self.callstack.counter - 1, ref))
         return ref
 
