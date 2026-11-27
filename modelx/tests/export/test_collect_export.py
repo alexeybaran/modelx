@@ -20,6 +20,14 @@ class TimedFuture(futures.Future):
         return super().result(timeout)
 
 
+class LeftFold:
+    def __init__(self, value):
+        self.value = value
+
+    def __add__(self, right):
+        return LeftFold(f'({self.value}+{right.value})')
+
+
 def export(model, tmp_path, monkeypatch, **kwargs):
     package = 'collect_export_%d' % next(_counter)
     model.export(tmp_path / package, **kwargs)
@@ -322,6 +330,73 @@ def test_parallel_export_overlaps_private_items_and_shares_locked_dependencies(
     assert sorted(item.key for item in calls) == [7, 7, 9]
     assert list(e.Shared.Table._mx_itemspaces.values()) == [e.Shared.Table[7]]
     assert not sys._is_gil_enabled()
+
+
+def test_parallel_export_folds_nested_python_values_in_domain_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, '_is_gil_enabled', lambda: False, raising=False)
+    keys = (32, 11, 8, 19, 4, 7)
+    model = mx.new_model()
+    try:
+        space = model.new_space('P', formula=lambda i: None,
+                                refs={'keys': keys, 'LeftFold': LeftFold})
+        space.set_collect(over={'i': 'keys'}, outputs=lambda: {
+            'individual': {'label': i},
+            'sum': {'metadata': {'fold': LeftFold(str(i))}, 'number': i}})
+        live = space.collect()
+        serial = export(model, tmp_path, monkeypatch).P.collect()
+        e = export(model, tmp_path, monkeypatch)
+    finally:
+        model.close()
+
+    e._mx_collect_workers = 4
+    first, later = keys[:2]
+    later_finished = threading.Event()
+    release_first = threading.Event()
+    evaluated = []
+    space_type = type(e.P)
+    output_formula = space_type._f_collect_outputs
+    module = importlib.import_module(type(e).__module__.rsplit('.', 1)[0] + '._mx_collect')
+    add_outputs = module.Accumulator.add
+
+    def outputs(item):
+        if item.i == first:
+            assert release_first.wait(5)
+        result = output_formula(item)
+        evaluated.append(item.i)
+        return result
+
+    class StaggeredExecutor(futures.ThreadPoolExecutor):
+        def submit(self, function, coordinate):
+            task = super().submit(function, coordinate)
+            if coordinate == first:
+                await_first = task.result
+
+                def result(timeout=None):
+                    assert later_finished.wait(5)
+                    release_first.set()
+                    return await_first(timeout)
+
+                task.result = result
+            elif coordinate == later:
+                task.add_done_callback(lambda done: later_finished.set())
+            return task
+
+    def add(accumulator, coordinate, result):
+        if coordinate != first:
+            # A scheduler folding finished tasks can finish the test, too.
+            assert later_finished.wait(5)
+            release_first.set()
+        add_outputs(accumulator, coordinate, result)
+
+    monkeypatch.setattr(space_type, '_f_collect_outputs', outputs)
+    monkeypatch.setattr(futures, 'ThreadPoolExecutor', StaggeredExecutor)
+    monkeypatch.setattr(module.Accumulator, 'add', add)
+    parallel = e.P.collect()
+    assert evaluated.index(later) < evaluated.index(first)
+    assert sorted(evaluated) == sorted(keys)
+    assert parallel.sum.metadata['fold'].value == serial.sum.metadata['fold'].value == live.sum.metadata['fold'].value
+    assert parallel.sum.number == serial.sum.number == live.sum.number == sum(keys)
+    assert {key: item.label for key, item in parallel.individual.items()} == {key: key for key in keys}
 
 
 def test_parallel_export_collect_same_key_shares_in_flight_result(model, tmp_path, monkeypatch):
