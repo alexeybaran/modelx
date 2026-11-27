@@ -1,6 +1,7 @@
 import gc
 import importlib
 import itertools
+import weakref
 
 import numpy as np
 import pytest
@@ -178,6 +179,34 @@ def test_exported_collect_releases_relative_space_and_cell_references(model, tmp
     assert e.P[3] is direct and direct.root_alias is direct
     assert direct.C is child and child.child_alias is child
     assert child.cell_alias.__self__ is child
+
+
+def test_exported_collect_releases_each_item_before_constructing_the_next(model, tmp_path, monkeypatch):
+    model.P.ids.formula = lambda: tuple(range(1, 129))
+    model.P.collect_outputs.formula = lambda: {'sum': {'value': C.y()}}
+    e = export(model, tmp_path, monkeypatch, use_slots=False)
+    direct = e.P[7]
+    roots = []
+    original = type(e.P)._mx_collect_item
+
+    def item(self, i, scen=1):
+        if roots:
+            assert roots[-1]() is None
+        result = original(self, i, scen)
+        roots.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(type(e.P), '_mx_collect_item', item)
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        assert e.P.collect().sum.value == 10 * sum(range(1, 129))
+        assert len(roots) == 128 and roots[-1]() is None
+        assert list(e.P._mx_itemspaces.values()) == [direct]
+        assert e.P[7] is direct and direct.C.y() == 70
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def test_reference_domain_and_a_member_named_collect(tmp_path, monkeypatch):
