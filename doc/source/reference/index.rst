@@ -20,6 +20,7 @@ Reference Guide
    iospec
    element
    toolapi
+   collect_hook
 
 
 
