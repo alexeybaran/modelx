@@ -30,13 +30,15 @@ except ImportError:     # - Python 3.7
     cached_property = property
 import pickle
 
+import libcst as cst
+
 from modelx.core import mxsys
 from modelx.core.base import Interface
 from modelx.core.parent import BaseParent
 from modelx.core.model import Model
 from modelx.core.space import BaseSpace, DynamicSpace
 from modelx.core.cells import Cells
-from modelx.serialize.ziputil import write_str_utf8, copy_file
+from modelx.serialize.ziputil import copy_file, read_file, write_file, write_str_utf8
 from modelx.core.util import abs_to_rel_tuple
 
 from . import _mx_sys
@@ -323,8 +325,32 @@ class Exporter:
             for child in parent.spaces.values():
                 que.append(child)
 
+    def _write_collect_runtime(self):
+        """Insert the Collect extension at its original positions in _mx_sys.py."""
+        from ._mx_collect_runtime import COLLECT_HELPERS, COLLECT_IMPORTS
+
+        base = read_file(lambda stream: stream.read(), this_dir / '_mx_sys.py', 'b')
+        newline = b'\r\n' if b'\r\n' in base else b'\n'
+        imports = COLLECT_IMPORTS.replace(b'\n', newline)
+        helpers = COLLECT_HELPERS.replace(b'\n', newline)
+
+        typing_import = b'from typing import Dict'
+        io_class = b'class MiniBaseSharedIO:'
+        stdlib, body = base.split(typing_import, 1)
+        spaces, io = body.split(io_class, 1)
+        runtime = stdlib + imports + typing_import + spaces + helpers + io_class + io
+        write_file(lambda stream: stream.write(runtime), self.path / '_mx_sys.py', 'b')
+
     def export(self):
+        collect_spaces = self.model._impl.collect_spaces
+        for space in collect_spaces:
+            space.collect_runner.check()
         io_manager = DataManager(self.model)
+        inputs = ItemInputSnapshot()
+        if collect_spaces:
+            for space in self.gen_parents():
+                if space is not self.model:
+                    inputs.capture(space._impl)
 
         # Create self.path dir and Write Model module
         write_str_utf8(
@@ -333,7 +359,11 @@ class Exporter:
             self.path / (MODEL_MODULE + '.py'))
 
         # Write _mx_sys.py
-        copy_file(this_dir / '_mx_sys.py', self.path / '_mx_sys.py')
+        if collect_spaces:
+            self._write_collect_runtime()
+            copy_file(this_dir / '_mx_collect.py', self.path / '_mx_collect.py')
+        else:
+            copy_file(this_dir / '_mx_sys.py', self.path / '_mx_sys.py')
         
         # Write _mx_macros.py if macros exist
         if self.model.macros:
@@ -361,7 +391,7 @@ class Exporter:
                 # Write space modules
                 write_str_utf8(
                     SpaceTranslator(parent, io_manager, self.use_slots,
-                                    self.locked_spaces).code,
+                                    self.locked_spaces, inputs).code,
                     cur_dir / (SPACE_MODULE + '.py'))
 
         # Write IO metadata
@@ -383,6 +413,51 @@ class Exporter:
 
         # Write pickle data
         io_manager.pickle(self.path / '_mx_pickled')
+
+
+class ItemInputSnapshot:
+    """Sparse authored Cells values for models that declare collect."""
+
+    def __init__(self):
+        self.static_trees = {}
+        self.cells = collections.defaultdict(set)
+        self.children = collections.defaultdict(set)
+        self.item_parents = set()
+
+    def capture(self, space):
+        tree = self._tree(space, dynamic=False)
+        if tree:
+            self.static_trees[space.idstr] = tree
+
+    def _tree(self, space, dynamic=True):
+        base = space._dynbase if dynamic else space
+        idstr = base.idstr
+        cells = {(name, key): cell.data[key]
+                 for name, cell in space.cells.items() if cell.is_cached
+                 for key in cell.input_keys}
+        children = {}
+        if dynamic:
+            for name, child in space.named_spaces.items():
+                tree = self._tree(child)
+                if tree:
+                    children[name] = tree
+        items = {}
+        for key, item in space.param_spaces.items():
+            tree = self._tree(item)
+            if tree:
+                items[key] = tree
+
+        tree = {}
+        if cells:
+            tree['cells'] = cells
+            self.cells[idstr].update(name for name, _ in cells)
+        if children:
+            tree['children'] = children
+            self.children[idstr].update(children)
+        if items:
+            tree['items'] = items
+            self.item_parents.add(idstr)
+        return tree
 
 
 class DataManager:
@@ -514,6 +589,7 @@ class ParentTranslator:
 
     def ref_copies(self, parent):
         result = []
+        relative = []
         for k in self.ref_names(parent):
             v = parent.refs[k]
 
@@ -525,7 +601,9 @@ class ParentTranslator:
                 proxy = parent._get_object(k, as_proxy=True)
                 refmode = proxy.refmode
                 if refmode == 'auto' or refmode == 'relative':
-                    if_clause = 'if ' + (base_k + '.__self__' if isinstance(v, Cells) else base_k) + '._mx_is_in(base_root) else ' + base_k
+                    is_cell = isinstance(v, Cells)
+                    relative.append((k, is_cell))
+                    if_clause = 'if ' + (base_k + '.__self__' if is_cell else base_k) + '._mx_is_in(base_root) else ' + base_k
                     result.append(self_k + ' = ' + self.ref_value(parent, v) + ' ' + if_clause)
                 elif refmode == 'absolute' or (
                         refmode is None and isinstance(proxy.parent, Model)):
@@ -542,7 +620,7 @@ class ParentTranslator:
         else:
             result.append('pass')
 
-        return "\n".join(result)
+        return "\n".join(result), tuple(relative)
 
     def ref_value(self, parent, value):
 
@@ -656,7 +734,7 @@ class SpaceTranslator(ParentTranslator):
     class_template = textwrap.dedent("""\
 
     _v_cells_names_{name} = [{cells_name_list}]
-    _v_space_params_{name} = [{space_param_list}]
+    _v_space_params_{name} = [{space_param_list}]{collect_ref_names}
 
 
     class _c_{name}(_mx_sys.BaseSpace):
@@ -784,7 +862,7 @@ class SpaceTranslator(ParentTranslator):
 
                 self._mx_assign_params(_mx_s, {args})
                 _mx_s._mx_roots.extend(self._mx_roots)
-                _mx_s._mx_roots.append(_mx_root){dynamic_refs}
+                _mx_s._mx_roots.append(_mx_root){dynamic_refs}{item_inputs}
 
             self._mx_itemspaces[_mx_key] = _mx_root
             return _mx_root
@@ -821,10 +899,47 @@ class SpaceTranslator(ParentTranslator):
 
                 self._mx_assign_params(_mx_s, {args})
                 _mx_s._mx_roots.extend(self._mx_roots)
-                _mx_s._mx_roots.append(_mx_root){dynamic_refs}
+                _mx_s._mx_roots.append(_mx_root){dynamic_refs}{item_inputs}
 
             self._mx_itemspaces[_mx_key] = _mx_root
             return _mx_root
+
+    """)
+
+    # A private ItemSpace for one coordinate, with the same parameter,
+    # Reference and authored input bindings as a Direct ItemSpace.
+    collect_methods = textwrap.dedent("""\
+    def _mx_collect_item(self, {params}):
+        _mx_base = self
+        _mx_root = _mx_base.__class__(self)
+        try:
+            for _mx_s, _mx_b in zip(_mx_root._mx_walk(), _mx_base._mx_walk()):
+                _mx_s._mx_copy_refs(_mx_b, _mx_base)
+                for _mx_r in self._mx_roots:
+                    _mx_r._mx_copy_params(_mx_s)
+
+                self._mx_assign_params(_mx_s, {args})
+                _mx_s._mx_roots.extend(self._mx_roots)
+                _mx_s._mx_roots.append(_mx_root){dynamic_refs}{item_inputs}
+        except BaseException:
+            _mx_sys.release_collect_item(_mx_root)
+            raise
+
+        return _mx_root
+
+    def _mx_collect_run(self{other_params}):
+        return _mx_sys.collect_from_space(
+            self, {domain},
+            lambda _mx_c: self._mx_collect_item({item_args}),
+            ({other_args}), self._mx_collect_cache)
+
+    @property
+    def {method}(self):
+        # Defined on the Space only, as in modelx: not on its ItemSpaces
+        if self._mx_roots:
+            raise AttributeError(
+                "Attribute '{method}' is not in an ItemSpace of " + self._name)
+        return self._mx_collect_run
 
     """)
 
@@ -856,10 +971,11 @@ class SpaceTranslator(ParentTranslator):
     """)
 
     def __init__(self, parent: BaseParent, io_manager: DataManager,
-                 use_slots: bool = True, locked_spaces=frozenset()):
+                 use_slots: bool = True, locked_spaces=frozenset(), inputs=None):
         super().__init__(parent, io_manager)
         self.use_slots = use_slots
         self.locked_spaces = locked_spaces
+        self.inputs = inputs if inputs is not None else ItemInputSnapshot()
 
     @cached_property
     def class_defs(self):
@@ -868,6 +984,31 @@ class SpaceTranslator(ParentTranslator):
             defs.append(self._get_class_def(space))
 
         return '\n'.join(defs)
+
+    @staticmethod
+    def formulas_with_inputs(trans, input_cells):
+        transformed = trans.transformed
+        if not input_cells:
+            return transformed.code
+        guards = {}
+        for name in input_cells:
+            args = trans.func_attrs[name].tuplized_arg_str
+            key = f'({name!r}, {args})'
+            guards['_f_' + name] = cst.parse_statement(
+                f'if self._mx_input_values is not None and {key} in self._mx_input_values:\n'
+                f'    return self._mx_input_values[{key}]\n')
+        methods = []
+        for method in transformed.body:
+            guard = guards.get(method.name.value)
+            if guard is not None:
+                suite = method.body
+                if isinstance(suite, cst.SimpleStatementSuite):
+                    suite = cst.IndentedBlock(body=(cst.SimpleStatementLine(body=suite.body),))
+                start = 1 if method.get_docstring() is not None else 0
+                suite = suite.with_changes(body=(*suite.body[:start], guard, *suite.body[start:]))
+                method = method.with_changes(body=suite)
+            methods.append(method)
+        return transformed.with_changes(body=methods).code
 
     def _get_class_def(self, space: BaseSpace):
 
@@ -903,6 +1044,11 @@ class SpaceTranslator(ParentTranslator):
 
         trans = FormulaTransformer(source, cells, cacheless)
 
+        input_space = space._impl.idstr
+        input_cells = self.inputs.cells.get(input_space)
+        input_children = self.inputs.children.get(input_space)
+        item_inputs = input_space in self.inputs.item_parents
+
         locked = space.fullname in self.locked_spaces
         if locked:
             # A parameter of this name would be assigned over the lock by
@@ -936,6 +1082,35 @@ class SpaceTranslator(ParentTranslator):
 
         cache_vars = []
         cache_methods = []
+        input_methods = []
+        assign_input_tree = []
+        if input_cells:
+            slot_names.append('_mx_input_values')
+            cache_vars.append('self._mx_input_values = None')
+            assign_input_tree.append("self._mx_input_values = tree.get('cells')")
+        if item_inputs:
+            slot_names.append('_mx_input_items')
+            cache_vars.append('self._mx_input_items = None')
+            assign_input_tree.append("self._mx_input_items = tree.get('items')")
+            class_names.add('_mx_apply_item_inputs')
+            input_methods.append(textwrap.dedent("""\
+                def _mx_apply_item_inputs(self, root, key):
+                    if self._mx_input_items is not None:
+                        tree = self._mx_input_items.get(key)
+                        if tree is not None:
+                            root._mx_assign_input_tree(tree)
+                """))
+        if input_children:
+            assign_input_tree.append("children = tree.get('children', {})")
+            for name in sorted(input_children):
+                assign_input_tree.extend([
+                    f'if {name!r} in children:',
+                    f'    self.{name}._mx_assign_input_tree(children[{name!r}])',
+                ])
+        if assign_input_tree:
+            class_names.add('_mx_assign_input_tree')
+            input_methods.append('def _mx_assign_input_tree(self, tree):\n'
+                                 + textwrap.indent('\n'.join(assign_input_tree), '    ') + '\n')
         for func in trans.func_attrs.values():
             if func.name in cacheless:
                 continue
@@ -981,6 +1156,8 @@ class SpaceTranslator(ParentTranslator):
             itemspace_dict = "self._mx_itemspaces = {}"
             slot_names.append('_mx_itemspaces')
             attrs = get_space_formula_attrs(space)
+            input_setup = ('\n        self._mx_apply_item_inputs(_mx_root, '
+                           + attrs.tuplized_arg_str + ')' if item_inputs else '')
             slot_names.extend(attrs.params)         # _mx_assign_params
             class_names.update([
                 '_mx_copy_params', '_mx_assign_params',
@@ -1000,6 +1177,7 @@ class SpaceTranslator(ParentTranslator):
                 args=attrs.arg_str,
                 params=attrs.param_str,
                 idx_args=attrs.key_str,
+                item_inputs=input_setup,
                 dynamic_refs=('\n\n        _mx_root._mx_apply_formula(' + attrs.arg_str + ')'
                               if space_formula else ''),
                 param_copies=textwrap.indent(
@@ -1031,6 +1209,35 @@ class SpaceTranslator(ParentTranslator):
                     for name, value in refs.items():
                         setattr(self, name, value)
                 """).replace('{dynamic_refs}', repr(tuple(dynamic_refs)))
+            runner = space._impl.collect_runner
+            if runner is not None:
+                method = 'collect'
+                if ('collect' in class_names or 'collect' in inherited_params
+                        or any(normalize(name) == 'collect' for name in slot_names)):
+                    method = '_mx_collect'   # a member named collect comes first
+                itemspace_dict += '\nself._mx_collect_cache = {}'
+                slot_names.append('_mx_collect_cache')
+                class_names.update(['_mx_collect_item', '_mx_collect_run', method])
+                others = [p for p in space.formula.signature.parameters.values()
+                          if p.name != runner.parameter]
+                other_args = ', '.join(p.name for p in others) + (
+                    ',' if len(others) == 1 else '')
+                domain = ('self.%s()' if runner.domain in space.cells
+                          else 'self.%s') % runner.domain
+                itemspace_methods += self.collect_methods.format(
+                    params=attrs.param_str,
+                    args=attrs.arg_str,
+                    item_inputs=input_setup,
+                    dynamic_refs=('\n\n        _mx_root._mx_apply_formula(' + attrs.arg_str + ')'
+                                  if space_formula else ''),
+                    method=method,
+                    other_params=''.join(
+                        ', ' + str(p) for p in others),
+                    domain=domain,
+                    item_args=', '.join(
+                        '_mx_c' if name == runner.parameter else name
+                        for name in attrs.params),
+                    other_args=other_args)
             delitem = self.delitem_asis
         else:
             itemspace_dict = ''
@@ -1045,22 +1252,28 @@ class SpaceTranslator(ParentTranslator):
         for name in dynamic_refs:
             if name not in space.refs:
                 ref_assigns += '\nself.' + name + ' = None'
+        input_tree = self.inputs.static_trees.get(input_space)
+        if input_tree is not None:
+            ref_assigns += ('\nself._mx_assign_input_tree(' + self.io_manager.get_code(input_tree) + ')')
+        ref_copies, relative_refs = self.ref_copies(space)
+        collect_ref_names = (f'\n_v_collect_refs_{space.name} = {relative_refs!r}'
+                             if relative_refs and space._impl.model.collect_spaces else '')
 
         return self.class_template.format(
             name=space.name,
             slots_decl=self.slots_decl(space, slot_names, class_names),
             cells_name_list=textwrap.indent(self.cells_name_list(space), ' ' * 4),
             space_param_list=textwrap.indent(self.space_param_list(space), ' ' * 4),
+            collect_ref_names=collect_ref_names,
             space_assigns=textwrap.indent(self.space_assigns(space), ' ' * 8),
             space_dict=textwrap.indent(self.space_dict(space), ' ' * 8),
             itemspace_dict=textwrap.indent(itemspace_dict, ' ' * 8),
             cache_vars=textwrap.indent("\n".join(cache_vars), ' ' * 8),
-            ref_copies=textwrap.indent(
-                self.ref_copies(space), ' ' * 8),
+            ref_copies=textwrap.indent(ref_copies, ' ' * 8),
             ref_assigns=textwrap.indent(ref_assigns, ' ' * 8),
-            methods=textwrap.indent(trans.transformed.code, ' ' * 4),
+            methods=textwrap.indent(self.formulas_with_inputs(trans, input_cells), ' ' * 4),
             cache_methods=textwrap.indent(''.join(cache_methods), ' ' * 4),
-            itemspace_methods=textwrap.indent(itemspace_methods, ' ' * 4),
+            itemspace_methods=textwrap.indent('\n'.join([itemspace_methods, *input_methods]), ' ' * 4),
             getitem=textwrap.indent(getitem, ' ' * 4),
             delitem=textwrap.indent(delitem, ' ' * 4)
         )
