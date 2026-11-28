@@ -87,13 +87,29 @@ class ItemSpaceManager:
         targets.extend(self._iter_foreign_targets(
             itertools.chain(changes.dirty_spaces.values(),
                             changes.dirty_bases.values())))
+        # collect() deleted the ItemSpaces it created; its node keeps the
+        # dynbases of their trees and is cleared as they would have been.
+        runners = []
+        for space in self.model.collect_spaces:
+            runner = space.collect_runner
+            if runner.data:
+                mros = set()
+                for idstr in runner.bases:
+                    mros.update(self._mros(idstr, mro_cache))
+                if (dirty & (runner.bases | mros | {space.idstr})
+                        or dirty_bases & runner.bases):
+                    runners.append(runner)
 
         for parent, key in targets:
             parent.clear_itemspace_at(key)  # no-op if a cascade or an
                                             # earlier clear removed it
+        for runner in runners:
+            runner.clear()
 
     def _invalidate_all(self):
         targets = list(self._iter_foreign_targets(self.model.yield_spaces()))
+        for space in list(self.model.collect_spaces):
+            space.collect_runner.clear()
         for space in self.model.yield_spaces():
             space.del_all_itemspaces()
         for parent, key in targets:
@@ -131,8 +147,6 @@ class ItemSpaceManager:
         """The closure of ``item`` (see the class docstring) as three
         idstr sets: recorded dynbases, their MRO bases, and the
         parent-chain UserSpace."""
-        graph = self.model.spmgr._graph
-
         chain = parent
         while chain.is_dynamic():
             chain = chain.parent
@@ -142,12 +156,17 @@ class ItemSpaceManager:
         for base in item.get_tree_dynbases():
             idstr = base.idstr
             bases.add(idstr)
-            if idstr not in mro_cache:
-                # A deleted dynbase's node is gone from the graph; its
-                # (still computable) idstr alone marks the tree stale.
-                mro_cache[idstr] = (
-                    graph.get_mro(idstr)[1:] if idstr in graph.nodes
-                    else []
-                )
-            mros.update(mro_cache[idstr])
+            mros.update(self._mros(idstr, mro_cache))
         return bases, mros, {chain.idstr}
+
+    def _mros(self, idstr, mro_cache):
+        """The MRO bases of the space ``idstr``, without itself."""
+        if idstr not in mro_cache:
+            # A deleted dynbase's node is gone from the graph; its
+            # (still computable) idstr alone marks the tree stale.
+            graph = self.model.spmgr._graph
+            mro_cache[idstr] = (
+                graph.get_mro(idstr)[1:] if idstr in graph.nodes
+                else []
+            )
+        return mro_cache[idstr]

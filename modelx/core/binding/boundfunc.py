@@ -131,15 +131,18 @@ class AlteredFunction(BaseNamespaceReferrer):
         self._is_global_updated = False
         self.is_altfunc_updated = True
 
-    def _get_referents(self):   # TODO: NameServer does not have cells, spaces, refs
+    def _get_referents(self, *, global_names=None):
 
+        # TODO: NameServer does not have cells, spaces, refs.
         ns = self.ns_server
         result = {}
 
         for key in ('cells', 'refs', 'spaces', 'missing', 'builtins'):
             result[key] = {}
 
-        for n in self.global_names:
+        if global_names is None:
+            global_names = self.global_names
+        for n in global_names:
 
             v = ns.cells.get(n)
             if v is not None:

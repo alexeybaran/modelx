@@ -20,6 +20,7 @@ class NonThreadedExecutor:
         self.errorstack = None
         self.rolledback = deque()
         self.callstack = CallStack(self, maxdepth)
+        self.collect_frame = None
         self.is_executing: bool = False
         self.tracegraph: Optional[TraceGraph] = None
         self.refgraph: Optional[ReferenceGraph] = None
@@ -30,6 +31,23 @@ class NonThreadedExecutor:
 
         obj = node[OBJ]
         key = node[KEY]
+        frame = self.collect_frame
+
+        if frame is not None:
+            owner = frame.owner_of(obj)
+            if owner is not None:
+                self._check_collect_boundary(owner)
+                if obj.is_cached:
+                    if obj.has_node(key):
+                        return obj.data[key]
+                    source = owner.input_source(obj, key)
+                    if source is not None:
+                        owner.nodes.add((source, key))
+                        return source.data[key]
+                return self._eval_formula(node)
+            if obj.is_cached and key and frame.owns_cache_key(key):
+                raise RuntimeError(
+                    'A cached external formula cannot take a temporary Collect ItemSpace argument')
 
         if obj.is_cached and obj.has_node(key):
             value = obj.data[key]
@@ -37,7 +55,11 @@ class NonThreadedExecutor:
                 # Shortcut for append & pop for performance
                 pred = self.callstack.idxstack[-1]
                 if pred >= 0:
-                    self.tracegraph.add_edge(node, self.callstack[pred])
+                    target = self.callstack[pred]
+                    if frame is not None and target == frame.caller:
+                        frame.nodes.add(node)
+                    else:
+                        self.tracegraph.add_edge(node, target)
                 # self.callstack.append(node)
                 # self.callstack.pop()
         else:
@@ -48,12 +70,22 @@ class NonThreadedExecutor:
 
         return value
 
+    def _check_collect_boundary(self, owner):
+        pred = self.callstack.idxstack[-1]
+        if pred < 0 or self.callstack[pred] != owner.caller:
+            raise RuntimeError('A cached external formula cannot read a temporary Collect ItemSpace')
+
     def _eval_formula(self, node: TraceNode):
 
         self.callstack.append(node)
         obj, key = node[OBJ], node[KEY]
 
         try:
+            frame = self.collect_frame
+            if frame is not None:
+                pred = self.callstack.idxstack[-1]
+                if pred >= 0 and self.callstack[pred] == frame.caller:
+                    frame.record_formula_refs(obj)
             value = obj.on_eval_formula(key)
 
         except:
@@ -119,6 +151,11 @@ class NonThreadedExecutor:
 
     def add_reference(self, ref):
         if self.is_executing:
+            frame = self.collect_frame
+            if frame is not None:
+                owner = frame.owner_of(ref)
+                if owner is not None:
+                    self._check_collect_boundary(owner)
             self.refstack.append((self.callstack.counter - 1, ref))
         return ref
 
@@ -249,7 +286,8 @@ class CallStack(deque):
             raise DeepReferenceError(
                 "Formula chain exceeded the %s limit" % self.maxdepth)
 
-        if item[OBJ].is_cached:
+        frame = self.executor.collect_frame
+        if item[OBJ].is_cached and (frame is None or not frame.owns(item[OBJ])):
             self.idxstack.append(stacklen)
         elif stacklen:
             self.idxstack.append(self.idxstack[-1])
@@ -266,13 +304,26 @@ class CallStack(deque):
         obj = node[OBJ]
 
         graph = self.executor.tracegraph
-        if self:    # Not empty
+        frame = self.executor.collect_frame
+        private = frame is not None and frame.owns(obj)
+        boundary = False
+        if private:
+            boundary = True
+        elif self:    # Not empty
             pred = self.idxstack[-1]    # index of last cached cells
             if pred >= 0:
-                if obj.is_cached:
-                    graph.add_edge(node, self[pred])
+                target = self[pred]
+                if frame is not None and target == frame.caller:
+                    if obj.is_cached:
+                        graph.add_node(node)
+                        frame.nodes.add(node)
+                    else:
+                        frame.refs.add(obj)
+                        boundary = True
+                elif obj.is_cached:
+                    graph.add_edge(node, target)
                 else:
-                    self.executor.refgraph.add_edge(obj, self[pred])
+                    self.executor.refgraph.add_edge(obj, target)
             else:
                 if obj.is_cached:
                     graph.add_node(node)
@@ -283,7 +334,11 @@ class CallStack(deque):
         while self.refstack:
             if self.refstack[-1][0] == self.counter:
                 _, ref = self.refstack.pop()
-                self.executor.refgraph.add_edge(ref, node)
+                if boundary:
+                    if not frame.owns(ref):
+                        frame.refs.add(ref)
+                else:
+                    self.executor.refgraph.add_edge(ref, node)
             else:
                 break
 

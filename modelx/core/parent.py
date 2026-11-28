@@ -97,7 +97,8 @@ class EditableParent(BaseParent):
         else:
             self._impl.set_attr(name, value, refmode="auto")
 
-    def new_space(self, name=None, bases=None, formula=None, refs=None):
+    def new_space(self, name=None, bases=None, formula=None, refs=None, *,
+                  collect_over=None, collect_outputs=None):
         """Create a child space.
 
         Args:
@@ -112,14 +113,33 @@ class EditableParent(BaseParent):
                 to be passed to this method when the dynamic child spaces
                 are created.
             refs (optional): A dict of name–value pairs to define refs in the created space.
+            collect_over (optional): Declares ``collect()`` on the new
+                space, as :meth:`~modelx.core.space.UserSpace.set_collect`
+                does with ``over``: a dict of one parameter of ``formula``
+                to the name of a Cells or a Reference of the new space.
+                Give it together with ``collect_outputs``.
+            collect_outputs (function, optional): The Python function for the
+                ``collect_outputs`` Cells that the new space gets, as
+                ``outputs`` of :meth:`~modelx.core.space.UserSpace.set_collect`.
 
         Returns:
             The new child space.
+
+        .. versionchanged:: 0.34.0
+            ``collect_over`` and ``collect_outputs`` were added.
         """
+        if (collect_over is None) != (collect_outputs is None):
+            raise TypeError("give collect_over and collect_outputs together")
         space = self._impl.model.currentspace = self._impl.model.updater.new_space(
             self._impl,
             name=name, bases=get_impls(bases), formula=formula, refs=refs
         )
+        if collect_over is not None:
+            try:
+                space.interface.set_collect(collect_over, collect_outputs)
+            except BaseException:
+                self._impl.model.updater.del_defined_space(space)
+                raise
         self._impl.system.currentmodel = space.model
         return space.interface
 

@@ -74,6 +74,11 @@ class BaseSpace(BaseParent, NodeFactory):
 
     def __getattr__(self, name):
 
+        if (name == "collect"
+                and getattr(self._impl, "collect_runner", None) is not None
+                and self._impl.get_attr(name) is None):
+            return self._mx_collect     # a member named collect comes first
+
         if self._impl.system.callstack.counter:     # TODO: check executer.is_executing instead
             return getattr(self._impl.namespace, name)
         else:
@@ -770,6 +775,105 @@ class UserSpace(BaseSpace, EditableParent):
     """
 
     __slots__ = ()
+    # ----------------------------------------------------------------------
+    # collect
+
+    def set_collect(self, over, outputs=None):
+        """Declare how ``collect()`` evaluates this Space, or remove it.
+
+        ``collect()`` evaluates the Space for each coordinate of a domain,
+        one ItemSpace after another, and returns the outputs that the
+        ``collect_outputs`` Cells of each ItemSpace gives::
+
+            >>> space = model.new_space('Projection', formula=lambda point_id: None)
+            >>> space.new_cells('point_ids', lambda: (1, 2, 3))
+            >>> space.new_cells('pv', lambda: point_id * 10.0)
+            >>> space.set_collect(over={'point_id': space.point_ids},
+            ...                   outputs=lambda: {'individual': {'pv': pv()},
+            ...                                    'sum': {'pv': pv()}})
+            >>> result = space.collect()
+            >>> result.sum.pv
+            60.0
+            >>> result.individual[2].pv
+            20.0
+
+        After a declaration ``space.collect`` is defined; a member named
+        ``collect`` comes first, and ``space._mx_collect()`` is then the
+        same call. ``collect()`` takes the parameters of the Space formula
+        other than the one collected over, as ``space[...]`` takes them.
+        It returns a ``CollectResult``:
+
+        * ``result.individual``: a dict from each coordinate, in domain
+          order, to the ``individual`` outputs of its ItemSpace.
+        * ``result.sum``: the ``sum`` outputs added over the domain. Each
+          value is ``total = total + value``, item after item in domain
+          order, starting from the first item's value: what the same loop
+          written by hand gives. Values in a dict are added key by key; a
+          str, a list or a tuple cannot be added.
+
+        A named output that is a dict can be read as ``s[t]`` or ``s(t)``.
+        Outputs are copied out of the ItemSpace, so they must be data:
+        a modelx object raises :obj:`TypeError`.
+
+        ``collect()`` calculates each coordinate in a temporary ItemSpace
+        and releases it before starting the next coordinate. Direct access
+        and ``collect()`` use the same explicitly assigned Cells inputs and
+        maintain their own calculated values. The result is cached like a
+        Cells value and invalidated by changes to its inputs, domain,
+        external dependencies, or Space and Cells formulas.
+
+        Args:
+            over (dict): One parameter of the Space formula mapped to the
+                domain: a zero-argument Cells of this Space, or the name
+                of a zero-argument Cells or of a Reference of this Space.
+                The domain's value must be a non-empty sequence of
+                distinct, hashable coordinates. :obj:`None` removes the
+                declaration and keeps the ``collect_outputs`` Cells.
+            outputs (function, optional): A Python function for the
+                ``collect_outputs`` Cells, which this method creates or replaces. It takes
+                no arguments and returns a dict with an ``'individual'``
+                section, a ``'sum'`` section or both, each a dict of names
+                to values. Omit it to keep an existing ``collect_outputs``.
+
+        The declaration belongs to this Space: a Space derived or copied
+        from it does not declare collect. :func:`~modelx.write_model`
+        saves the declaration, and :func:`~modelx.export_model` exports
+        ``collect()``. If the Space formula loses the parameter, or the
+        domain or ``collect_outputs`` is deleted, ``collect()``, writing
+        and exporting raise an error until the declaration is set again
+        or removed.
+
+        .. versionadded:: 0.34.0
+        """
+        from modelx.core.collect import OUTPUTS, parse_declaration
+        impl = self._impl
+        if over is None:
+            if outputs is not None:
+                raise TypeError("outputs without over")
+            impl.del_collect()
+            return
+        parameter, domain, formula = parse_declaration(impl, over, outputs)
+        if domain not in impl.cells and domain not in impl.own_refs:
+            raise ValueError(
+                "the collect domain %r is no Cells or Reference of %s"
+                % (domain, impl.name))
+        if formula is None:
+            if OUTPUTS not in impl.cells:
+                raise TypeError("set_collect needs outputs: %s has no %s"
+                                % (impl.name, OUTPUTS))
+        elif OUTPUTS in impl.cells:
+            self.cells[OUTPUTS].formula = outputs
+        else:
+            self.new_cells(OUTPUTS, outputs)
+        impl.set_collect(parameter, domain)
+
+    def _mx_collect(self, *args, **kwargs):
+        """``collect()`` of a Space that has a member named ``collect``."""
+        runner = self._impl.collect_runner
+        if runner is None:
+            raise TypeError("%s does not declare collect" % self._impl.name)
+        return runner.call(args, kwargs)
+
     # ----------------------------------------------------------------------
     # Manipulating cells
 
@@ -1727,7 +1831,9 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
         self._named_itemspaces = {}
         self.itemspacenamer = AutoNamer("__Space")
 
-        if self.is_dynamic():
+        if getattr(self, '_collect_frame', None) is not None:
+            self.dynamic_cache = self._collect_frame.dynamic_cache
+        elif self.is_dynamic():
             self.dynamic_cache = self.parent.dynamic_cache
         else:
             # Cache interfaces for reuse after deletion
@@ -1806,7 +1912,7 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
         node = get_node(self, args, kwargs)
         return self.system.executor.eval_node(node)
 
-    def on_eval_formula(self, key):
+    def _resolve_itemspace_params(self, key):
         params = self.altfunc(*key)
 
         if params is None:
@@ -1853,7 +1959,12 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
         else:
             raise ValueError("Space formula must return either dict or None")
 
+        return base, refs
+
+    def on_eval_formula(self, key):
+        base, refs = self._resolve_itemspace_params(key)
         dkey = (self.dynamic_key if self.is_dynamic() else ()) + (key,)
+        frame = getattr(self, '_collect_frame', None)
 
         space = ItemSpaceImpl(
             parent=self,
@@ -1861,7 +1972,9 @@ class ItemSpaceParent(NodeFactoryImpl, AlteredFunction):
             name=None,
             refs=refs,
             arguments=node_get_args(key_to_node(self, key)),
-            cache=self.dynamic_cache.get(dkey, None)
+            cache=self.dynamic_cache.get(dkey, None),
+            frame=frame,
+            direct=frame.direct_item(self, key) if frame is not None else None,
         )
 
         self.param_spaces[key] = space
@@ -2010,7 +2123,8 @@ class BaseSpaceImpl(*_base_space_impl_base):
     def __getstate__(self):
         d = {attr: getattr(self, attr)
                 for c in type(self).mro()[:-1]
-                for attr in c.__slots__ if attr != "dynamic_cache"}   # exclude object type
+                for attr in c.__slots__
+                if attr not in ('dynamic_cache', '_collect_frame')}
         return d
 
     def __setstate__(self, state):
@@ -2252,7 +2366,8 @@ class UserSpaceImpl(*_user_space_impl_base):
 
     __slots__ = (
         "cellsnamer",
-        "source"
+        "source",
+        "collect_runner"
     ) + get_mixin_slots(*_user_space_impl_base)
 
     def __init__(
@@ -2279,6 +2394,33 @@ class UserSpaceImpl(*_user_space_impl_base):
             self.source = source.__name__
         else:
             self.source = source
+
+        self.collect_runner = None
+
+    # ----------------------------------------------------------------------
+    # collect
+
+    def set_collect(self, parameter, domain):
+        """Declare collect over ``parameter``, replacing any declaration."""
+        from modelx.core.collect import CollectRunner
+        self.del_collect()
+        self.collect_runner = CollectRunner(self, parameter, domain)
+        self.model.collect_spaces.add(self)
+
+    def del_collect(self):
+        if self in self.model.collect_spaces:
+            self.collect_runner.clear()
+            self.collect_runner = None
+            self.model.collect_spaces.discard(self)
+
+    def del_all_itemspaces(self):
+        if self in self.model.collect_spaces:
+            self.collect_runner.clear()
+        super().del_all_itemspaces()
+
+    def on_delete(self):
+        self.del_collect()
+        super().on_delete()
 
     def _init_refs(self, arguments=None):
         self.refs = CustomChainMap(self.own_refs, self.sys_refs, self.model._global_refs)
